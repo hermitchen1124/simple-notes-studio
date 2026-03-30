@@ -2,9 +2,12 @@ import Editor, { type Monaco, type OnMount } from "@monaco-editor/react";
 import { confirm, open } from "@tauri-apps/plugin-dialog";
 import DOMPurify from "dompurify";
 import MarkdownIt from "markdown-it";
-import { startTransition, useEffect, useRef, useState } from "react";
+import { startTransition, useEffect, useRef, useState, type CSSProperties } from "react";
 import {
+  DEFAULT_SETTINGS,
+  isTauriRuntime,
   loadSession,
+  normalizeSettings,
   openWorkspace,
   readFile,
   saveSession,
@@ -14,6 +17,8 @@ import {
   writeFile,
 } from "./api";
 import type {
+  AppAppearance,
+  AppSettings,
   EditorViewState,
   FileTab,
   FormatResult,
@@ -30,6 +35,8 @@ type Toast = {
   message: string;
   tone: ToastTone;
 };
+
+type MarkdownViewMode = "editor" | "split" | "preview";
 
 const markdown = new MarkdownIt({
   html: false,
@@ -58,6 +65,10 @@ function supportsFormatting(extension: string) {
   return extension === "json" || extension === "jsonl";
 }
 
+function supportsTextZoom(extension: string) {
+  return extension === "txt" || extension === "md" || extension === "markdown";
+}
+
 function shortenPath(filePath: string) {
   const parts = filePath.split(/[/\\]+/);
   return parts.slice(-3).join("/");
@@ -77,6 +88,78 @@ function groupHits(hits: SearchHit[]) {
   }
 
   return Array.from(grouped.entries());
+}
+
+function normalizePath(value: string) {
+  return value.replace(/\\/g, "/");
+}
+
+function isInsideWorkspace(filePath: string, workspacePath: string) {
+  const normalizedFilePath = normalizePath(filePath);
+  const normalizedWorkspacePath = normalizePath(workspacePath).replace(/\/+$/, "");
+  return (
+    normalizedFilePath === normalizedWorkspacePath ||
+    normalizedFilePath.startsWith(`${normalizedWorkspacePath}/`)
+  );
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function searchContent(
+  filePath: string,
+  content: string,
+  query: string,
+  caseSensitive: boolean,
+  wholeWord: boolean,
+) {
+  const hits: SearchHit[] = [];
+  const matcher = wholeWord
+    ? new RegExp(`\\b${escapeRegExp(query)}\\b`, caseSensitive ? "g" : "gi")
+    : null;
+
+  content.split("\n").forEach((line, lineIndex) => {
+    if (matcher) {
+      for (const matched of line.matchAll(matcher)) {
+        const start = (matched.index ?? 0) + 1;
+        hits.push({
+          filePath,
+          lineNumber: lineIndex + 1,
+          columnStart: start,
+          columnEnd: start + query.length,
+          lineText: line,
+        });
+      }
+      return;
+    }
+
+    const source = caseSensitive ? line : line.toLowerCase();
+    const needle = caseSensitive ? query : query.toLowerCase();
+    let offset = 0;
+
+    while (needle && offset <= source.length) {
+      const found = source.indexOf(needle, offset);
+      if (found === -1) {
+        break;
+      }
+
+      hits.push({
+        filePath,
+        lineNumber: lineIndex + 1,
+        columnStart: found + 1,
+        columnEnd: found + query.length + 1,
+        lineText: line,
+      });
+      offset = found + Math.max(query.length, 1);
+    }
+  });
+
+  return hits;
+}
+
+function clampTextZoom(value: number) {
+  return Math.min(1.8, Math.max(0.8, Number(value.toFixed(2))));
 }
 
 function defineEditorTheme(monaco: Monaco) {
@@ -115,6 +198,44 @@ function defineEditorTheme(monaco: Monaco) {
       "editor.selectionBackground": "#ead9c5",
       "editor.inactiveSelectionBackground": "#f1e7db",
       "editorCursor.foreground": "#9c3d2d",
+    },
+  });
+
+  monaco.editor.defineTheme("studio-paper", {
+    base: "vs",
+    inherit: true,
+    rules: [
+      { token: "key", foreground: "2f5b74" },
+      { token: "string", foreground: "2d7b52" },
+      { token: "number", foreground: "8a4a2f" },
+      { token: "keyword", foreground: "355f90", fontStyle: "bold" },
+    ],
+    colors: {
+      "editor.background": "#fcfdff",
+      "editorLineNumber.foreground": "#9aa6b3",
+      "editorLineNumber.activeForeground": "#3f5368",
+      "editor.selectionBackground": "#dfe8f3",
+      "editor.inactiveSelectionBackground": "#ebf1f7",
+      "editorCursor.foreground": "#355f90",
+    },
+  });
+
+  monaco.editor.defineTheme("studio-midnight", {
+    base: "vs-dark",
+    inherit: true,
+    rules: [
+      { token: "key", foreground: "f3b269" },
+      { token: "string", foreground: "88c8a7" },
+      { token: "number", foreground: "d29bff" },
+      { token: "keyword", foreground: "7ec8ff", fontStyle: "bold" },
+    ],
+    colors: {
+      "editor.background": "#101720",
+      "editorLineNumber.foreground": "#5f7388",
+      "editorLineNumber.activeForeground": "#c8d9ea",
+      "editor.selectionBackground": "#27435b",
+      "editor.inactiveSelectionBackground": "#1a2b3b",
+      "editorCursor.foreground": "#f2c078",
     },
   });
 }
@@ -185,17 +306,23 @@ function App() {
   const [wholeWord, setWholeWord] = useState(false);
   const [searchResults, setSearchResults] = useState<SearchHit[]>([]);
   const [searching, setSearching] = useState(false);
-  const [markdownPreviewVisible, setMarkdownPreviewVisible] = useState(true);
+  const [markdownViewMode, setMarkdownViewMode] = useState<MarkdownViewMode>("split");
+  const [markdownSplitRatio, setMarkdownSplitRatio] = useState(0.58);
   const [jsonlStatus, setJsonlStatus] = useState<FormatResult | null>(null);
+  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
   const monacoRef = useRef<Monaco | null>(null);
+  const previewBodyRef = useRef<HTMLDivElement | null>(null);
+  const editorLayoutRef = useRef<HTMLDivElement | null>(null);
   const tabsRef = useRef<FileTab[]>([]);
   const activeTabPathRef = useRef<string | null>(null);
   const viewStateRef = useRef<Record<string, EditorViewState>>({});
   const pendingViewStateRef = useRef<EditorViewState | null>(null);
   const sessionReadyRef = useRef(false);
   const toastIdRef = useRef(0);
+  const resizeStateRef = useRef<{ pointerId: number } | null>(null);
 
   useEffect(() => {
     tabsRef.current = tabs;
@@ -203,6 +330,24 @@ function App() {
   }, [tabs, activeTabPath]);
 
   const activeTab = tabs.find((tab) => tab.path === activeTabPath) ?? null;
+  const markdownActive = activeTab ? isMarkdownFile(activeTab.extension) : false;
+  const zoomEnabled = activeTab ? supportsTextZoom(activeTab.extension) : false;
+  const showEditorPanel = !markdownActive || markdownViewMode !== "preview";
+  const showPreviewPanel = markdownActive && markdownViewMode !== "editor";
+  const editorTheme =
+    settings.appearance === "night"
+      ? "studio-midnight"
+      : settings.appearance === "paper"
+        ? "studio-paper"
+        : "studio-sand";
+  const editorFontSize = zoomEnabled ? Math.round(14 * settings.textZoom) : 14;
+  const editorLineHeight = zoomEnabled ? Math.round(22 * settings.textZoom) : 22;
+  const previewHtml = markdownActive && activeTab
+    ? DOMPurify.sanitize(markdown.render(activeTab.content))
+    : "";
+  const previewBodyStyle = markdownActive
+    ? ({ fontSize: `${settings.textZoom}rem` } as CSSProperties)
+    : undefined;
 
   function pushToast(message: string, tone: ToastTone = "info") {
     toastIdRef.current += 1;
@@ -232,6 +377,45 @@ function App() {
       scrollTop: Math.round(editor.getScrollTop()),
       scrollLeft: Math.round(editor.getScrollLeft()),
     };
+  }
+
+  function updateSettings(nextSettings: Partial<AppSettings>) {
+    setSettings((previous) => normalizeSettings({ ...previous, ...nextSettings }));
+  }
+
+  function setAppearance(appearance: AppAppearance) {
+    updateSettings({ appearance });
+  }
+
+  function adjustTextZoom(delta: number) {
+    updateSettings({ textZoom: clampTextZoom(settings.textZoom + delta) });
+  }
+
+  function resetTextZoom() {
+    updateSettings({ textZoom: DEFAULT_SETTINGS.textZoom });
+  }
+
+  function syncPreviewScrollFromEditor() {
+    const editor = editorRef.current;
+    const preview = previewBodyRef.current;
+
+    if (!editor || !preview || !activeTabPathRef.current) {
+      return;
+    }
+
+    const currentTab = tabsRef.current.find((tab) => tab.path === activeTabPathRef.current);
+    if (!currentTab || !isMarkdownFile(currentTab.extension) || markdownViewMode !== "split") {
+      return;
+    }
+
+    const maxEditorScroll = Math.max(
+      editor.getScrollHeight() - editor.getLayoutInfo().height,
+      1,
+    );
+    const editorProgress = editor.getScrollTop() / maxEditorScroll;
+    const maxPreviewScroll = Math.max(preview.scrollHeight - preview.clientHeight, 0);
+
+    preview.scrollTop = maxPreviewScroll * editorProgress;
   }
 
   async function openFilePath(filePath: string, viewState?: EditorViewState | null) {
@@ -273,6 +457,19 @@ function App() {
   }
 
   async function handleOpenWorkspace() {
+    if (!isTauriRuntime) {
+      try {
+        const nextWorkspace = await openWorkspace("/demo");
+        setWorkspace(nextWorkspace);
+        setWorkspacePath("/demo");
+        setCollapsedPaths(new Set());
+        pushToast("Loaded mock workspace preview", "success");
+      } catch (error) {
+        pushToast(String(error), "error");
+      }
+      return;
+    }
+
     const selected = await open({
       directory: true,
       multiple: false,
@@ -295,6 +492,11 @@ function App() {
   }
 
   async function handleOpenFiles() {
+    if (!isTauriRuntime) {
+      await openFilePath("/demo/notes.txt");
+      return;
+    }
+
     const selected = await open({
       multiple: true,
       title: "Open files",
@@ -378,13 +580,12 @@ function App() {
 
     const target = currentTabs[index];
     if (target.dirty) {
-      const shouldClose = await confirm(
-        `${target.name} has unsaved changes. Close anyway?`,
-        {
-          title: "Unsaved changes",
-          kind: "warning",
-        },
-      );
+      const shouldClose = isTauriRuntime
+        ? await confirm(`${target.name} has unsaved changes. Close anyway?`, {
+            title: "Unsaved changes",
+            kind: "warning",
+          })
+        : window.confirm(`${target.name} has unsaved changes. Close anyway?`);
 
       if (!shouldClose) {
         return;
@@ -411,12 +612,33 @@ function App() {
 
     setSearching(true);
     try {
-      const nextResults = await searchWorkspace(
+      const backendResults = await searchWorkspace(
         workspacePath,
         searchText.trim(),
         caseSensitive,
         wholeWord,
       );
+      const openedWorkspaceTabs = tabsRef.current.filter((tab) =>
+        isInsideWorkspace(tab.path, workspacePath),
+      );
+      const openedPaths = new Set(openedWorkspaceTabs.map((tab) => tab.path));
+      const inMemoryResults = openedWorkspaceTabs.flatMap((tab) =>
+        searchContent(tab.path, tab.content, searchText.trim(), caseSensitive, wholeWord),
+      );
+      const nextResults = [
+        ...backendResults.filter((hit) => !openedPaths.has(hit.filePath)),
+        ...inMemoryResults,
+      ].sort((left, right) => {
+        const fileCompare = left.filePath.localeCompare(right.filePath);
+        if (fileCompare !== 0) {
+          return fileCompare;
+        }
+        if (left.lineNumber !== right.lineNumber) {
+          return left.lineNumber - right.lineNumber;
+        }
+        return left.columnStart - right.columnStart;
+      });
+
       setSearchResults(nextResults);
       pushToast(`Found ${nextResults.length} matches`, "info");
     } catch (error) {
@@ -454,6 +676,7 @@ function App() {
     });
     editor.onDidScrollChange(() => {
       recordActiveViewState();
+      syncPreviewScrollFromEditor();
     });
   };
 
@@ -473,6 +696,7 @@ function App() {
         ) as Record<string, EditorViewState>;
         viewStateRef.current = nextViews;
         setRecentFiles(nextRecentFiles);
+        setSettings(normalizeSettings(session.settings));
 
         if (session.workspacePath) {
           try {
@@ -551,6 +775,7 @@ function App() {
         activeTab: activeTabPath,
         views: activeViews,
         recentFiles,
+        settings,
       };
 
       void saveSession(state);
@@ -559,16 +784,13 @@ function App() {
     return () => {
       window.clearTimeout(timer);
     };
-  }, [workspacePath, tabs, activeTabPath, recentFiles]);
+  }, [workspacePath, tabs, activeTabPath, recentFiles, settings]);
 
   useEffect(() => {
     if (!activeTab) {
-      setMarkdownPreviewVisible(false);
       setJsonlStatus(null);
       return;
     }
-
-    setMarkdownPreviewVisible(isMarkdownFile(activeTab.extension));
   }, [activeTab?.path]);
 
   useEffect(() => {
@@ -636,6 +858,7 @@ function App() {
         column: pending.column || 1,
       });
       pendingViewStateRef.current = null;
+      syncPreviewScrollFromEditor();
     });
 
     return () => {
@@ -644,7 +867,70 @@ function App() {
   }, [activeTabPath, activeTab?.content]);
 
   useEffect(() => {
+    if (!markdownActive || markdownViewMode !== "split") {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      syncPreviewScrollFromEditor();
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+    };
+  }, [markdownActive, markdownViewMode, activeTab?.content]);
+
+  useEffect(() => {
+    function updateSplitRatio(clientX: number) {
+      const layout = editorLayoutRef.current;
+      if (!layout) {
+        return;
+      }
+
+      const bounds = layout.getBoundingClientRect();
+      if (bounds.width <= 0) {
+        return;
+      }
+
+      const nextRatio = (clientX - bounds.left) / bounds.width;
+      setMarkdownSplitRatio(Math.min(0.75, Math.max(0.25, nextRatio)));
+    }
+
+    function onPointerMove(event: PointerEvent) {
+      if (!resizeStateRef.current) {
+        return;
+      }
+
+      event.preventDefault();
+      updateSplitRatio(event.clientX);
+    }
+
+    function onPointerUp(event: PointerEvent) {
+      if (!resizeStateRef.current || resizeStateRef.current.pointerId !== event.pointerId) {
+        return;
+      }
+
+      resizeStateRef.current = null;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    }
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+  }, []);
+
+  useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setSettingsOpen(false);
+        return;
+      }
+
       const modifier = event.metaKey || event.ctrlKey;
       if (!modifier) {
         return;
@@ -654,6 +940,34 @@ function App() {
       if (key === "s") {
         event.preventDefault();
         void handleSaveActiveTab();
+        return;
+      }
+
+      if (key === ",") {
+        event.preventDefault();
+        setSettingsOpen(true);
+        return;
+      }
+
+      if (!zoomEnabled) {
+        return;
+      }
+
+      if (key === "=" || key === "+") {
+        event.preventDefault();
+        adjustTextZoom(0.1);
+        return;
+      }
+
+      if (key === "-" || key === "_") {
+        event.preventDefault();
+        adjustTextZoom(-0.1);
+        return;
+      }
+
+      if (key === "0") {
+        event.preventDefault();
+        resetTextZoom();
       }
     }
 
@@ -661,15 +975,19 @@ function App() {
     return () => {
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [activeTab]);
+  }, [zoomEnabled, settings.textZoom, activeTab]);
 
-  const previewHtml = activeTab && isMarkdownFile(activeTab.extension)
-    ? DOMPurify.sanitize(markdown.render(activeTab.content))
-    : "";
   const groupedResults = groupHits(searchResults);
+  const splitLayoutStyle =
+    showEditorPanel && showPreviewPanel
+      ? ({
+          "--split-left": `${markdownSplitRatio}fr`,
+          "--split-right": `${1 - markdownSplitRatio}fr`,
+        } as CSSProperties)
+      : undefined;
 
   return (
-    <main className="app-shell">
+    <main className="app-shell" data-theme={settings.appearance}>
       <aside className="sidebar">
         <div className="brand-card">
           <p className="eyebrow">Simple Notes Studio</p>
@@ -818,6 +1136,9 @@ function App() {
             >
               Format
             </button>
+            <button className="toolbar-button" onClick={() => setSettingsOpen(true)}>
+              Settings
+            </button>
           </div>
           <div className="toolbar-right">
             <button
@@ -847,13 +1168,40 @@ function App() {
             >
               Copy
             </button>
-            {activeTab && isMarkdownFile(activeTab.extension) ? (
-              <button
-                className="icon-button"
-                onClick={() => setMarkdownPreviewVisible((previous) => !previous)}
-              >
-                {markdownPreviewVisible ? "Hide preview" : "Show preview"}
-              </button>
+            {zoomEnabled ? (
+              <div className="zoom-group" aria-label="Text zoom controls">
+                <button className="icon-button" onClick={() => adjustTextZoom(-0.1)}>
+                  A-
+                </button>
+                <button className="zoom-indicator" onClick={() => resetTextZoom()}>
+                  {Math.round(settings.textZoom * 100)}%
+                </button>
+                <button className="icon-button" onClick={() => adjustTextZoom(0.1)}>
+                  A+
+                </button>
+              </div>
+            ) : null}
+            {markdownActive ? (
+              <div className="view-mode-group" role="tablist" aria-label="Markdown view mode">
+                <button
+                  className={`icon-button ${markdownViewMode === "editor" ? "active" : ""}`}
+                  onClick={() => setMarkdownViewMode("editor")}
+                >
+                  Editor
+                </button>
+                <button
+                  className={`icon-button ${markdownViewMode === "split" ? "active" : ""}`}
+                  onClick={() => setMarkdownViewMode("split")}
+                >
+                  Split
+                </button>
+                <button
+                  className={`icon-button ${markdownViewMode === "preview" ? "active" : ""}`}
+                  onClick={() => setMarkdownViewMode("preview")}
+                >
+                  Preview
+                </button>
+              </div>
             ) : null}
           </div>
         </header>
@@ -888,50 +1236,74 @@ function App() {
         </div>
 
         {activeTab ? (
-          <div className={`editor-layout ${markdownPreviewVisible && isMarkdownFile(activeTab.extension) ? "split" : ""}`}>
-            <div className="editor-panel">
-              <div className="file-status">
-                <div>
-                  <strong>{activeTab.name}</strong>
-                  <span>{activeTab.path}</span>
+          <div
+            className={`editor-layout ${showEditorPanel && showPreviewPanel ? "split" : ""}`}
+            ref={editorLayoutRef}
+            style={splitLayoutStyle}
+          >
+            {showEditorPanel ? (
+              <div className="editor-panel">
+                <div className="file-status">
+                  <div>
+                    <strong>{activeTab.name}</strong>
+                    <span>{activeTab.path}</span>
+                  </div>
+                  <div className="status-badges">
+                    <span>{activeTab.extension.toUpperCase()}</span>
+                    <span>{activeTab.dirty ? "Unsaved" : "Saved"}</span>
+                  </div>
                 </div>
-                <div className="status-badges">
-                  <span>{activeTab.extension.toUpperCase()}</span>
-                  <span>{activeTab.dirty ? "Unsaved" : "Saved"}</span>
+                {activeTab.extension === "jsonl" && jsonlStatus && !jsonlStatus.valid ? (
+                  <div className="error-banner">{jsonlStatus.error}</div>
+                ) : null}
+                <div className="editor-surface">
+                  <Editor
+                    beforeMount={defineEditorTheme}
+                    onMount={handleEditorMount}
+                    theme={editorTheme}
+                    path={activeTab.path}
+                    value={activeTab.content}
+                    language={inferLanguage(activeTab.extension)}
+                    height="100%"
+                    saveViewState
+                    loading={<div className="empty-panel">Loading editor...</div>}
+                    onChange={handleEditorChange}
+                    options={{
+                      minimap: { enabled: false },
+                      fontSize: editorFontSize,
+                      lineHeight: editorLineHeight,
+                      smoothScrolling: true,
+                      automaticLayout: true,
+                      padding: { top: 18, bottom: 18 },
+                      fontFamily:
+                        "'SF Mono', 'JetBrains Mono', 'Menlo', 'Consolas', monospace",
+                      scrollBeyondLastLine: false,
+                    }}
+                  />
                 </div>
               </div>
-              {activeTab.extension === "jsonl" && jsonlStatus && !jsonlStatus.valid ? (
-                <div className="error-banner">{jsonlStatus.error}</div>
-              ) : null}
-              <Editor
-                beforeMount={defineEditorTheme}
-                onMount={handleEditorMount}
-                theme="studio-sand"
-                path={activeTab.path}
-                value={activeTab.content}
-                language={inferLanguage(activeTab.extension)}
-                saveViewState
-                loading={<div className="empty-panel">Loading editor...</div>}
-                onChange={handleEditorChange}
-                options={{
-                  minimap: { enabled: false },
-                  fontSize: 14,
-                  lineHeight: 22,
-                  smoothScrolling: true,
-                  automaticLayout: true,
-                  padding: { top: 18, bottom: 18 },
-                  fontFamily:
-                    "'SF Mono', 'JetBrains Mono', 'Menlo', 'Consolas', monospace",
-                  scrollBeyondLastLine: false,
-                }}
-              />
-            </div>
+            ) : null}
 
-            {markdownPreviewVisible && isMarkdownFile(activeTab.extension) ? (
+            {showEditorPanel && showPreviewPanel ? (
+              <div
+                className="editor-splitter"
+                aria-label="Resize markdown split view"
+                onPointerDown={(event) => {
+                  resizeStateRef.current = { pointerId: event.pointerId };
+                  document.body.style.cursor = "col-resize";
+                  document.body.style.userSelect = "none";
+                }}
+                role="separator"
+              />
+            ) : null}
+
+            {showPreviewPanel ? (
               <article className="preview-panel">
                 <div className="preview-header">Markdown preview</div>
                 <div
                   className="preview-body"
+                  ref={previewBodyRef}
+                  style={previewBodyStyle}
                   dangerouslySetInnerHTML={{ __html: previewHtml }}
                 />
               </article>
@@ -950,6 +1322,72 @@ function App() {
           </div>
         )}
       </section>
+
+      {settingsOpen ? (
+        <div className="settings-overlay" onClick={() => setSettingsOpen(false)}>
+          <section
+            className="settings-dialog"
+            aria-label="System settings"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="settings-header">
+              <div>
+                <p className="eyebrow">System settings</p>
+                <h2>Appearance and reading scale</h2>
+              </div>
+              <button className="icon-button" onClick={() => setSettingsOpen(false)}>
+                Close
+              </button>
+            </div>
+
+            <div className="settings-section">
+              <span>Appearance</span>
+              <div className="appearance-grid">
+                {([
+                  ["warm", "Warm"],
+                  ["paper", "Paper"],
+                  ["night", "Night"],
+                ] as const).map(([appearance, label]) => (
+                  <button
+                    key={appearance}
+                    className={`appearance-option ${
+                      settings.appearance === appearance ? "active" : ""
+                    }`}
+                    onClick={() => setAppearance(appearance)}
+                  >
+                    <strong>{label}</strong>
+                    <span>{appearance === "warm"
+                      ? "Warm parchment tones"
+                      : appearance === "paper"
+                        ? "Cool clean daylight"
+                        : "Dark focused contrast"}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="settings-section">
+              <span>Text zoom for TXT and Markdown</span>
+              <div className="settings-zoom-row">
+                <button className="icon-button" onClick={() => adjustTextZoom(-0.1)}>
+                  A-
+                </button>
+                <div className="settings-zoom-value">{Math.round(settings.textZoom * 100)}%</div>
+                <button className="icon-button" onClick={() => adjustTextZoom(0.1)}>
+                  A+
+                </button>
+                <button className="ghost-button" onClick={() => resetTextZoom()}>
+                  Reset
+                </button>
+              </div>
+              <div className="workspace-meta">
+                Applies to TXT editor text and Markdown editor or preview. Shortcuts:
+                Cmd/Ctrl +, opens settings, Cmd/Ctrl + +/-/0 adjusts zoom.
+              </div>
+            </div>
+          </section>
+        </div>
+      ) : null}
 
       <div className="toast-stack">
         {toasts.map((toast) => (

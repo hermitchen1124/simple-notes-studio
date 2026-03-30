@@ -67,6 +67,22 @@ struct EditorViewState {
     scroll_left: u32,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct AppSettings {
+    appearance: String,
+    text_zoom: f64,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            appearance: "warm".into(),
+            text_zoom: 1.0,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 struct SessionState {
@@ -75,6 +91,8 @@ struct SessionState {
     active_tab: Option<String>,
     views: Vec<EditorViewState>,
     recent_files: Vec<String>,
+    #[serde(default)]
+    settings: AppSettings,
 }
 
 #[tauri::command]
@@ -506,6 +524,10 @@ mod tests {
                 scroll_left: 0,
             }],
             recent_files: vec!["/tmp/demo/a.md".into()],
+            settings: AppSettings {
+                appearance: "night".into(),
+                text_zoom: 1.2,
+            },
         };
 
         write_session_file(&session_path, &session).expect("write session");
@@ -514,6 +536,8 @@ mod tests {
         assert_eq!(loaded.active_tab, session.active_tab);
         assert_eq!(loaded.views[0].line, 12);
         assert_eq!(loaded.recent_files.len(), 1);
+        assert_eq!(loaded.settings.appearance, "night");
+        assert_eq!(loaded.settings.text_zoom, 1.2);
     }
 
     #[test]

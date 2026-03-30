@@ -1,9 +1,4 @@
 :root {
-  color: #1b1815;
-  background:
-    radial-gradient(circle at top left, rgba(211, 125, 64, 0.18), transparent 28%),
-    radial-gradient(circle at bottom right, rgba(30, 106, 128, 0.16), transparent 24%),
-    linear-gradient(160deg, #f4ecde 0%, #efe2cf 42%, #e6d6c0 100%);
   font-family: "Avenir Next", "Segoe UI", sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -30,21 +25,124 @@ button {
 }
 
 .app-shell {
+  --app-bg:
+    radial-gradient(circle at top left, rgba(211, 125, 64, 0.18), transparent 28%),
+    radial-gradient(circle at bottom right, rgba(30, 106, 128, 0.16), transparent 24%),
+    linear-gradient(160deg, #f4ecde 0%, #efe2cf 42%, #e6d6c0 100%);
+  --app-text: #1b1815;
+  --surface-bg: rgba(255, 250, 242, 0.82);
+  --surface-bg-strong: rgba(255, 252, 247, 0.92);
+  --surface-soft: rgba(255, 247, 236, 0.72);
+  --brand-surface:
+    linear-gradient(145deg, rgba(255, 247, 235, 0.92), rgba(235, 223, 203, 0.88));
+  --border-soft: rgba(95, 67, 43, 0.12);
+  --border-button: rgba(126, 85, 51, 0.18);
+  --shadow-color: rgba(71, 51, 33, 0.12);
+  --heading-text: #2c2118;
+  --panel-text: #352920;
+  --muted-text: #54443a;
+  --secondary-text: #68574a;
+  --button-text: #3d3026;
+  --accent-text: #94653d;
+  --active-bg: linear-gradient(135deg, rgba(191, 112, 51, 0.18), rgba(38, 121, 144, 0.14));
+  --active-border: rgba(126, 85, 51, 0.3);
+  --active-chip-bg: rgba(209, 137, 76, 0.16);
+  --active-chip-text: #7f3d1e;
+  --badge-bg: rgba(214, 193, 169, 0.34);
+  --inline-code-bg: rgba(201, 175, 142, 0.22);
+  --code-bg: #f5ede0;
+  --error-bg: rgba(173, 63, 44, 0.12);
+  --error-text: #86311f;
+  --toast-info: #6a5746;
+  --toast-success: #356b60;
+  --toast-error: #a5452d;
   display: grid;
   grid-template-columns: 330px minmax(0, 1fr);
   gap: 18px;
-  min-height: 100vh;
+  height: 100vh;
   padding: 18px;
   box-sizing: border-box;
+  overflow: hidden;
+  background: var(--app-bg);
+  color: var(--app-text);
+}
+
+.app-shell[data-theme="paper"] {
+  --app-bg:
+    radial-gradient(circle at top left, rgba(104, 155, 194, 0.14), transparent 30%),
+    radial-gradient(circle at bottom right, rgba(196, 147, 104, 0.12), transparent 26%),
+    linear-gradient(160deg, #f7fafc 0%, #edf3f8 50%, #e5edf4 100%);
+  --app-text: #22313f;
+  --surface-bg: rgba(252, 254, 255, 0.84);
+  --surface-bg-strong: rgba(255, 255, 255, 0.94);
+  --surface-soft: rgba(242, 247, 251, 0.78);
+  --brand-surface:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.96), rgba(231, 240, 247, 0.92));
+  --border-soft: rgba(76, 106, 131, 0.14);
+  --border-button: rgba(76, 106, 131, 0.18);
+  --shadow-color: rgba(45, 70, 92, 0.12);
+  --heading-text: #1c2a37;
+  --panel-text: #293847;
+  --muted-text: #4d6174;
+  --secondary-text: #667c91;
+  --button-text: #314455;
+  --accent-text: #537191;
+  --active-bg: linear-gradient(135deg, rgba(83, 113, 145, 0.16), rgba(108, 158, 120, 0.12));
+  --active-border: rgba(83, 113, 145, 0.24);
+  --active-chip-bg: rgba(83, 113, 145, 0.14);
+  --active-chip-text: #31506f;
+  --badge-bg: rgba(198, 214, 228, 0.5);
+  --inline-code-bg: rgba(188, 208, 225, 0.28);
+  --code-bg: #eef4f9;
+  --error-bg: rgba(191, 87, 61, 0.12);
+  --error-text: #9d412d;
+  --toast-info: #51677c;
+  --toast-success: #2f6f5f;
+  --toast-error: #a94f3d;
+}
+
+.app-shell[data-theme="night"] {
+  --app-bg:
+    radial-gradient(circle at top left, rgba(242, 192, 120, 0.14), transparent 26%),
+    radial-gradient(circle at bottom right, rgba(93, 154, 206, 0.16), transparent 24%),
+    linear-gradient(160deg, #0f141c 0%, #111b24 44%, #172430 100%);
+  --app-text: #ebf2f8;
+  --surface-bg: rgba(17, 28, 39, 0.84);
+  --surface-bg-strong: rgba(20, 31, 43, 0.94);
+  --surface-soft: rgba(29, 43, 57, 0.78);
+  --brand-surface:
+    linear-gradient(145deg, rgba(24, 36, 48, 0.96), rgba(31, 49, 66, 0.92));
+  --border-soft: rgba(126, 156, 183, 0.18);
+  --border-button: rgba(126, 156, 183, 0.22);
+  --shadow-color: rgba(0, 0, 0, 0.32);
+  --heading-text: #f4f8fb;
+  --panel-text: #dde7f0;
+  --muted-text: #aebfce;
+  --secondary-text: #8ea1b4;
+  --button-text: #ecf3f9;
+  --accent-text: #f2c078;
+  --active-bg: linear-gradient(135deg, rgba(92, 141, 182, 0.28), rgba(242, 192, 120, 0.16));
+  --active-border: rgba(126, 156, 183, 0.3);
+  --active-chip-bg: rgba(92, 141, 182, 0.18);
+  --active-chip-text: #ffd39c;
+  --badge-bg: rgba(79, 101, 123, 0.52);
+  --inline-code-bg: rgba(91, 117, 145, 0.24);
+  --code-bg: #16212b;
+  --error-bg: rgba(173, 63, 44, 0.22);
+  --error-text: #ffc1b4;
+  --toast-info: #435a70;
+  --toast-success: #2f6f5f;
+  --toast-error: #b44d3a;
 }
 
 .sidebar,
 .workspace-shell {
+  min-height: 0;
   backdrop-filter: blur(14px);
-  background: rgba(255, 250, 242, 0.82);
-  border: 1px solid rgba(95, 67, 43, 0.12);
+  background: var(--surface-bg);
+  border: 1px solid var(--border-soft);
   border-radius: 24px;
-  box-shadow: 0 24px 80px rgba(71, 51, 33, 0.12);
+  box-shadow: 0 24px 80px var(--shadow-color);
 }
 
 .sidebar {
@@ -56,8 +154,8 @@ button {
 }
 
 .brand-card {
-  background: linear-gradient(145deg, rgba(255, 247, 235, 0.92), rgba(235, 223, 203, 0.88));
-  border: 1px solid rgba(124, 83, 49, 0.12);
+  background: var(--brand-surface);
+  border: 1px solid var(--border-soft);
   border-radius: 20px;
   padding: 18px;
 }
@@ -67,7 +165,7 @@ button {
   letter-spacing: 0.14em;
   text-transform: uppercase;
   font-size: 0.74rem;
-  color: #94653d;
+  color: var(--accent-text);
 }
 
 .brand-card h1,
@@ -76,14 +174,14 @@ button {
   font-family: "Iowan Old Style", "Georgia", serif;
   font-size: 2rem;
   line-height: 1.05;
-  color: #2c2118;
+  color: var(--heading-text);
 }
 
 .brand-copy,
 .workspace-empty p {
   margin: 12px 0 0;
   line-height: 1.6;
-  color: #54443a;
+  color: var(--muted-text);
 }
 
 .sidebar-section {
@@ -105,7 +203,7 @@ button {
 .section-header span,
 .preview-header {
   font-weight: 700;
-  color: #352920;
+  color: var(--panel-text);
 }
 
 .ghost-button,
@@ -125,11 +223,16 @@ button {
 .ghost-button,
 .toolbar-button,
 .icon-button {
-  background: rgba(255, 248, 238, 0.9);
-  border: 1px solid rgba(126, 85, 51, 0.18);
+  background: var(--surface-soft);
+  border: 1px solid var(--border-button);
   border-radius: 999px;
   padding: 9px 14px;
-  color: #3d3026;
+  color: var(--button-text);
+}
+
+.icon-button.active {
+  background: var(--active-bg);
+  border-color: var(--active-border);
 }
 
 .ghost-button:hover,
@@ -147,7 +250,7 @@ button {
 .empty-panel,
 .tab-empty {
   font-size: 0.92rem;
-  color: #68574a;
+  color: var(--secondary-text);
 }
 
 .tree-panel,
@@ -160,18 +263,18 @@ button {
 }
 
 .text-input {
-  border: 1px solid rgba(126, 85, 51, 0.16);
+  border: 1px solid var(--border-button);
   border-radius: 14px;
   padding: 11px 12px;
-  background: rgba(255, 250, 243, 0.9);
-  color: #2d251f;
+  background: var(--surface-bg-strong);
+  color: var(--app-text);
 }
 
 .toggle {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #5d4f43;
+  color: var(--muted-text);
   font-size: 0.92rem;
 }
 
@@ -183,7 +286,7 @@ button {
   text-align: left;
   background: transparent;
   border-radius: 14px;
-  color: #2d241c;
+  color: var(--app-text);
 }
 
 .tree-row {
@@ -194,8 +297,8 @@ button {
 }
 
 .tree-file.active {
-  background: rgba(209, 137, 76, 0.16);
-  color: #7f3d1e;
+  background: var(--active-chip-bg);
+  color: var(--active-chip-text);
 }
 
 .tree-folder {
@@ -204,7 +307,7 @@ button {
 
 .tree-caret {
   min-width: 14px;
-  color: #91613d;
+  color: var(--accent-text);
 }
 
 .search-group,
@@ -219,11 +322,11 @@ button {
   align-items: center;
   justify-content: space-between;
   padding: 8px 10px;
-  background: rgba(255, 247, 236, 0.7);
+  background: var(--surface-soft);
 }
 
 .search-file span:last-child {
-  color: #8b5b34;
+  color: var(--accent-text);
 }
 
 .search-hit {
@@ -231,23 +334,25 @@ button {
   grid-template-columns: 54px 1fr;
   gap: 8px;
   padding: 7px 10px;
-  color: #53463b;
+  color: var(--muted-text);
 }
 
 .search-hit strong {
-  color: #9c4e23;
+  color: var(--accent-text);
 }
 
 .recent-item {
   padding: 8px 10px;
-  background: rgba(255, 248, 240, 0.6);
+  background: var(--surface-soft);
 }
 
 .workspace-shell {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
   padding: 14px;
+  overflow: hidden;
 }
 
 .toolbar {
@@ -262,6 +367,11 @@ button {
   gap: 8px;
 }
 
+.view-mode-group {
+  display: inline-flex;
+  gap: 8px;
+}
+
 .tab-strip {
   display: flex;
   gap: 10px;
@@ -273,17 +383,17 @@ button {
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  background: rgba(255, 247, 236, 0.72);
-  border: 1px solid rgba(116, 80, 52, 0.14);
+  background: var(--surface-soft);
+  border: 1px solid var(--border-soft);
   border-radius: 999px;
   padding: 10px 14px;
-  color: #433227;
+  color: var(--button-text);
   white-space: nowrap;
 }
 
 .tab-chip.active {
-  background: linear-gradient(135deg, rgba(191, 112, 51, 0.18), rgba(38, 121, 144, 0.14));
-  color: #2c231c;
+  background: var(--active-bg);
+  color: var(--heading-text);
 }
 
 .dirty-dot {
@@ -300,7 +410,7 @@ button {
   width: 18px;
   height: 18px;
   border-radius: 999px;
-  background: rgba(75, 59, 45, 0.08);
+  background: var(--badge-bg);
 }
 
 .editor-layout {
@@ -308,20 +418,55 @@ button {
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
+  overflow: hidden;
 }
 
 .editor-layout.split {
-  grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
-  gap: 14px;
+  grid-template-columns:
+    minmax(0, var(--split-left, 0.58fr))
+    12px
+    minmax(320px, var(--split-right, 0.42fr));
+  gap: 0;
 }
 
 .editor-panel,
 .preview-panel {
+  display: flex;
+  flex-direction: column;
   min-height: 0;
-  background: rgba(255, 252, 247, 0.92);
-  border: 1px solid rgba(111, 75, 45, 0.12);
+  background: var(--surface-bg-strong);
+  border: 1px solid var(--border-soft);
   border-radius: 20px;
   overflow: hidden;
+}
+
+.editor-surface {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.editor-splitter {
+  position: relative;
+  cursor: col-resize;
+}
+
+.editor-splitter::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 18px;
+  bottom: 18px;
+  width: 2px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background:
+    linear-gradient(
+      180deg,
+      rgba(180, 137, 96, 0.1),
+      rgba(180, 137, 96, 0.65),
+      rgba(59, 121, 139, 0.22)
+    );
 }
 
 .file-status {
@@ -331,31 +476,26 @@ button {
 .file-status strong {
   display: block;
   margin-bottom: 4px;
-  color: #261d16;
+  color: var(--heading-text);
 }
 
 .file-status span {
-  color: #645346;
+  color: var(--secondary-text);
   font-size: 0.9rem;
 }
 
 .status-badges span {
-  background: rgba(214, 193, 169, 0.34);
+  background: var(--badge-bg);
   border-radius: 999px;
   padding: 6px 10px;
 }
 
 .error-banner {
   margin: 0 18px 12px;
-  background: rgba(173, 63, 44, 0.12);
-  color: #86311f;
+  background: var(--error-bg);
+  color: var(--error-text);
   border-radius: 14px;
   padding: 10px 12px;
-}
-
-.preview-panel {
-  display: flex;
-  flex-direction: column;
 }
 
 .preview-header {
@@ -363,27 +503,29 @@ button {
 }
 
 .preview-body {
+  flex: 1;
+  min-height: 0;
   padding: 0 18px 24px;
   overflow: auto;
   line-height: 1.7;
-  color: #32281f;
+  color: var(--app-text);
 }
 
 .preview-body h1,
 .preview-body h2,
 .preview-body h3 {
   font-family: "Iowan Old Style", "Georgia", serif;
-  color: #231a14;
+  color: var(--heading-text);
 }
 
 .preview-body code {
-  background: rgba(201, 175, 142, 0.22);
+  background: var(--inline-code-bg);
   padding: 0.1em 0.35em;
   border-radius: 8px;
 }
 
 .preview-body pre {
-  background: #f5ede0;
+  background: var(--code-bg);
   padding: 14px;
   border-radius: 16px;
   overflow: auto;
@@ -416,15 +558,127 @@ button {
 }
 
 .toast.info {
-  background: #6a5746;
+  background: var(--toast-info);
 }
 
 .toast.success {
-  background: #356b60;
+  background: var(--toast-success);
 }
 
 .toast.error {
-  background: #a5452d;
+  background: var(--toast-error);
+}
+
+.zoom-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.zoom-indicator {
+  min-width: 72px;
+  border-radius: 999px;
+  border: 1px solid var(--border-button);
+  background: var(--surface-soft);
+  color: var(--button-text);
+  padding: 9px 12px;
+}
+
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(9, 12, 16, 0.34);
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  z-index: 20;
+}
+
+.settings-dialog {
+  width: min(720px, calc(100vw - 32px));
+  background: var(--surface-bg-strong);
+  border: 1px solid var(--border-soft);
+  border-radius: 24px;
+  box-shadow: 0 28px 90px var(--shadow-color);
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.settings-header,
+.settings-section,
+.settings-zoom-row,
+.appearance-grid {
+  display: flex;
+  gap: 14px;
+}
+
+.settings-header,
+.settings-section {
+  justify-content: space-between;
+}
+
+.settings-header {
+  align-items: flex-start;
+}
+
+.settings-header h2 {
+  margin: 4px 0 0;
+  font-family: "Iowan Old Style", "Georgia", serif;
+  color: var(--heading-text);
+}
+
+.settings-section {
+  flex-direction: column;
+}
+
+.settings-section > span {
+  font-weight: 700;
+  color: var(--panel-text);
+}
+
+.appearance-grid {
+  flex-wrap: wrap;
+}
+
+.appearance-option {
+  flex: 1 1 180px;
+  min-width: 0;
+  padding: 16px;
+  border-radius: 18px;
+  text-align: left;
+  background: var(--surface-soft);
+  border: 1px solid var(--border-button);
+  color: var(--button-text);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.appearance-option.active {
+  background: var(--active-bg);
+  border-color: var(--active-border);
+}
+
+.appearance-option span {
+  color: var(--secondary-text);
+  line-height: 1.5;
+}
+
+.settings-zoom-row {
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.settings-zoom-value {
+  min-width: 88px;
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: var(--surface-soft);
+  border: 1px solid var(--border-button);
+  color: var(--button-text);
+  text-align: center;
 }
 
 @media (max-width: 1100px) {
@@ -444,5 +698,30 @@ button {
 
   .editor-layout.split {
     grid-template-columns: 1fr;
+  }
+
+  .toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .toolbar-left,
+  .toolbar-right {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 720px) {
+  .settings-overlay {
+    padding: 14px;
+  }
+
+  .settings-dialog {
+    width: 100%;
+    padding: 18px;
+  }
+
+  .settings-header {
+    flex-direction: column;
   }
 }

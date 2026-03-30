@@ -41,12 +41,20 @@ export type EditorViewState = {
   scrollLeft: number;
 };
 
+export type AppAppearance = "warm" | "paper" | "night";
+
+export type AppSettings = {
+  appearance: AppAppearance;
+  textZoom: number;
+};
+
 export type SessionState = {
   workspacePath: string | null;
   openTabs: string[];
   activeTab: string | null;
   views: EditorViewState[];
   recentFiles: string[];
+  settings: AppSettings;
 };
 
 export type FileTab = {
