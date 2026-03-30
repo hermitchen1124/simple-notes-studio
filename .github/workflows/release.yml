@@ -66,5 +66,5 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: Simple Notes Studio ${{ github.ref_name }}
           releaseBody: Installers for ${{ github.ref_name }}.
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
