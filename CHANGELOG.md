@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2
+
+- Fixed the GitHub Actions release workflow by aligning the workflow pnpm version with `package.json`.
+- Re-ran the release pipeline with a new tag after the failed `v0.1.1` packaging attempt.
+
 ## 0.1.1
 
 - Added Markdown split improvements with preview-only mode, synced preview scrolling, and draggable split resizing.

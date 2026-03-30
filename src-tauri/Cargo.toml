@@ -1,6 +1,6 @@
 [package]
 name = "simple-notes-studio"
-version = "0.1.1"
+version = "0.1.2"
 description = "A clean multi-format desktop editor built with Tauri"
 authors = ["hermitchen1124"]
 edition = "2021"
