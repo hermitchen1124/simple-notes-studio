@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.3
+
+- Added multi-workspace support so multiple folders can stay open at the same time and the active workspace drives search scope.
+- Reworked the sidebar layout with responsive container rules plus a draggable app split between the sidebar and main editor area.
+- Narrowed the workspace tree and search index to supported text and config formats only: `txt`, `md`, `markdown`, `json`, `jsonl`, `yaml`, `yml`, `toml`, and `log`.
+- Added macOS file associations for the supported formats so the app can be selected from Finder's `Open With` flow.
+
 ## 0.1.2
 
 - Fixed the GitHub Actions release workflow by aligning the workflow pnpm version with `package.json`.

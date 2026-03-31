@@ -10,9 +10,20 @@ import type {
   WorkspaceNode,
 } from "./types";
 
-const MOCK_WORKSPACE_ROOT = "/demo";
+const MOCK_WORKSPACE_ROOTS = ["/demo", "/notes-lab"] as const;
 const MOCK_FILES_KEY = "simple-notes-studio.mock.files";
 const MOCK_SESSION_KEY = "simple-notes-studio.mock.session";
+const SUPPORTED_EXTENSIONS = [
+  "txt",
+  "md",
+  "markdown",
+  "json",
+  "jsonl",
+  "yaml",
+  "yml",
+  "toml",
+  "log",
+] as const;
 const DEFAULT_SETTINGS: AppSettings = {
   appearance: "warm",
   textZoom: 1,
@@ -35,6 +46,19 @@ Restore tabs from the previous session.
   "/demo/data/config.json": `{"name":"Simple Notes Studio","formats":["json","jsonl","md","txt"],"search":{"caseSensitive":true,"wholeWord":true}}`,
   "/demo/data/events.jsonl": `{"event":"open","count":3}
 {"event":"save","count":2}`,
+  "/demo/logs/app.log": `2026-03-31 10:00:12 INFO launch app
+2026-03-31 10:00:13 INFO restore session`,
+  "/notes-lab/guide.md": `# Notes Lab
+
+This mock workspace exists so the browser preview can exercise multi-workspace UI.
+`,
+  "/notes-lab/config/app.toml": `[app]
+name = "Simple Notes Studio"
+theme = "night"`,
+  "/notes-lab/config/workflow.yaml": `name: preview
+steps:
+  - open
+  - search`,
 };
 
 function hasTauriRuntime() {
@@ -49,23 +73,32 @@ function detectExtension(filePath: string) {
   return parts.length > 1 ? parts[parts.length - 1].toLowerCase() : "txt";
 }
 
+function isSearchableExtension(extension: string) {
+  return SUPPORTED_EXTENSIONS.includes(extension as (typeof SUPPORTED_EXTENSIONS)[number]);
+}
+
 function detectName(filePath: string) {
   return filePath.split(/[/\\]/).pop() ?? filePath;
 }
 
-function buildWorkspaceTree(files: Record<string, string>): WorkspaceNode {
+function buildWorkspaceTree(files: Record<string, string>, rootPath: string): WorkspaceNode {
+  const rootName = rootPath.split(/[/\\]/).pop() ?? rootPath;
   const root: WorkspaceNode = {
-    name: "demo",
-    path: MOCK_WORKSPACE_ROOT,
+    name: rootName,
+    path: rootPath,
     isDir: true,
     children: [],
   };
 
   for (const filePath of Object.keys(files).sort()) {
-    const relativePath = filePath.replace(`${MOCK_WORKSPACE_ROOT}/`, "");
+    if (!filePath.startsWith(`${rootPath}/`) || !isSearchableExtension(detectExtension(filePath))) {
+      continue;
+    }
+
+    const relativePath = filePath.replace(`${rootPath}/`, "");
     const segments = relativePath.split("/");
     let current = root;
-    let currentPath = MOCK_WORKSPACE_ROOT;
+    let currentPath = rootPath;
 
     segments.forEach((segment, index) => {
       currentPath = `${currentPath}/${segment}`;
@@ -107,7 +140,9 @@ function defaultMockSession(files: Record<string, string>): SessionState {
   }));
 
   return {
-    workspacePath: MOCK_WORKSPACE_ROOT,
+    workspacePath: "/demo",
+    workspacePaths: ["/demo"],
+    activeWorkspacePath: "/demo",
     openTabs,
     activeTab: openTabs[indexOrZero(openTabs.length - 1)] ?? openTabs[0] ?? null,
     views,
@@ -163,8 +198,22 @@ function normalizeSettings(value?: Partial<AppSettings>): AppSettings {
 }
 
 function normalizeSessionState(value?: Partial<SessionState>): SessionState {
+  const legacyWorkspacePath = value?.workspacePath ?? null;
+  const workspacePaths = Array.isArray(value?.workspacePaths)
+    ? value?.workspacePaths.filter((item): item is string => typeof item === "string")
+    : legacyWorkspacePath
+      ? [legacyWorkspacePath]
+      : [];
+  const activeWorkspacePath =
+    value?.activeWorkspacePath ??
+    legacyWorkspacePath ??
+    workspacePaths[0] ??
+    null;
+
   return {
-    workspacePath: value?.workspacePath ?? null,
+    workspacePath: activeWorkspacePath,
+    workspacePaths,
+    activeWorkspacePath,
     openTabs: value?.openTabs ?? [],
     activeTab: value?.activeTab ?? null,
     views: value?.views ?? [],
@@ -185,6 +234,10 @@ function mockSearch(
     : null;
 
   for (const [filePath, content] of Object.entries(files)) {
+    if (!isSearchableExtension(detectExtension(filePath))) {
+      continue;
+    }
+
     content.split("\n").forEach((line, lineIndex) => {
       if (matcher) {
         for (const matched of line.matchAll(matcher)) {
@@ -299,10 +352,10 @@ function mockReadFile(path: string): FileContent {
 function openWorkspace(path: string) {
   if (!isTauriRuntime) {
     const files = loadMockFiles();
-    if (path !== MOCK_WORKSPACE_ROOT) {
+    if (!MOCK_WORKSPACE_ROOTS.includes(path as (typeof MOCK_WORKSPACE_ROOTS)[number])) {
       return Promise.reject(new Error(`Mock workspace not found: ${path}`));
     }
-    return Promise.resolve(buildWorkspaceTree(files));
+    return Promise.resolve(buildWorkspaceTree(files, path));
   }
 
   return invoke<WorkspaceNode>("open_workspace", { path });
@@ -328,6 +381,14 @@ function writeFile(path: string, content: string) {
   }
 
   return invoke<SaveResult>("write_file", { path, content });
+}
+
+function startupFiles() {
+  if (!isTauriRuntime) {
+    return Promise.resolve<string[]>([]);
+  }
+
+  return invoke<string[]>("startup_files");
 }
 
 function searchWorkspace(
@@ -393,6 +454,7 @@ export {
   readFile,
   saveSession,
   searchWorkspace,
+  startupFiles,
   validateAndFormatJson,
   validateAndFormatJsonl,
   writeFile,

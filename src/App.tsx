@@ -2,7 +2,15 @@ import Editor, { type Monaco, type OnMount } from "@monaco-editor/react";
 import { confirm, open } from "@tauri-apps/plugin-dialog";
 import DOMPurify from "dompurify";
 import MarkdownIt from "markdown-it";
-import { startTransition, useEffect, useRef, useState, type CSSProperties } from "react";
+import {
+  startTransition,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type FormEvent,
+} from "react";
 import {
   DEFAULT_SETTINGS,
   isTauriRuntime,
@@ -12,6 +20,7 @@ import {
   readFile,
   saveSession,
   searchWorkspace,
+  startupFiles,
   validateAndFormatJson,
   validateAndFormatJsonl,
   writeFile,
@@ -24,6 +33,7 @@ import type {
   FormatResult,
   SearchHit,
   SessionState,
+  WorkspaceEntry,
   WorkspaceNode,
 } from "./types";
 import "./App.css";
@@ -37,6 +47,39 @@ type Toast = {
 };
 
 type MarkdownViewMode = "editor" | "split" | "preview";
+type CreatableFileExtension =
+  | "txt"
+  | "md"
+  | "json"
+  | "jsonl"
+  | "yaml"
+  | "yml"
+  | "toml"
+  | "log";
+
+const SUPPORTED_TEXT_EXTENSIONS: readonly CreatableFileExtension[] = [
+  "txt",
+  "md",
+  "json",
+  "jsonl",
+  "yaml",
+  "yml",
+  "toml",
+  "log",
+];
+const CREATABLE_FILE_EXTENSIONS: CreatableFileExtension[] = [...SUPPORTED_TEXT_EXTENSIONS];
+const SEARCHABLE_EXTENSIONS = new Set([
+  "txt",
+  "md",
+  "markdown",
+  "json",
+  "jsonl",
+  "yaml",
+  "yml",
+  "toml",
+  "log",
+]);
+const DEFAULT_SEARCH_FEEDBACK = "Choose a workspace and click Run.";
 
 const markdown = new MarkdownIt({
   html: false,
@@ -54,6 +97,12 @@ function inferLanguage(extension: string) {
   if (extension === "jsonl") {
     return "jsonl";
   }
+  if (extension === "yaml" || extension === "yml") {
+    return "yaml";
+  }
+  if (extension === "toml") {
+    return "ini";
+  }
   return "plaintext";
 }
 
@@ -67,6 +116,10 @@ function supportsFormatting(extension: string) {
 
 function supportsTextZoom(extension: string) {
   return extension === "txt" || extension === "md" || extension === "markdown";
+}
+
+function isSearchableExtension(extension: string) {
+  return SEARCHABLE_EXTENSIONS.has(extension.toLowerCase());
 }
 
 function shortenPath(filePath: string) {
@@ -92,6 +145,19 @@ function groupHits(hits: SearchHit[]) {
 
 function normalizePath(value: string) {
   return value.replace(/\\/g, "/");
+}
+
+function fileDirectory(filePath: string) {
+  const normalized = normalizePath(filePath).replace(/\/+$/, "");
+  const separatorIndex = normalized.lastIndexOf("/");
+  if (separatorIndex <= 0) {
+    return normalized;
+  }
+  return normalized.slice(0, separatorIndex);
+}
+
+function joinPath(parent: string, name: string) {
+  return `${normalizePath(parent).replace(/\/+$/, "")}/${name}`;
 }
 
 function isInsideWorkspace(filePath: string, workspacePath: string) {
@@ -160,6 +226,58 @@ function searchContent(
 
 function clampTextZoom(value: number) {
   return Math.min(1.8, Math.max(0.8, Number(value.toFixed(2))));
+}
+
+function stripKnownExtension(value: string) {
+  return value.trim().replace(/\.(txt|md|markdown|json|jsonl|yaml|yml|toml|log)$/i, "");
+}
+
+function countEditableFiles(node: WorkspaceNode): number {
+  if (!node.isDir) {
+    const extension = node.name.split(".").pop()?.toLowerCase() ?? "txt";
+    return isSearchableExtension(extension) ? 1 : 0;
+  }
+
+  return node.children.reduce((total, child) => total + countEditableFiles(child), 0);
+}
+
+function workspaceContainsPath(node: WorkspaceNode | null, targetPath: string): boolean {
+  if (!node) {
+    return false;
+  }
+
+  if (normalizePath(node.path) === normalizePath(targetPath)) {
+    return true;
+  }
+
+  return node.children.some((child) => workspaceContainsPath(child, targetPath));
+}
+
+function findWorkspacePathForFile(filePath: string, workspacePaths: string[]) {
+  const matches = workspacePaths
+    .filter((workspacePath) => isInsideWorkspace(filePath, workspacePath))
+    .sort((left, right) => right.length - left.length);
+
+  return matches[0] ?? null;
+}
+
+function replaceWorkspaceEntry(
+  previous: WorkspaceEntry[],
+  nextEntry: WorkspaceEntry,
+  activate = true,
+) {
+  const existingIndex = previous.findIndex((item) => item.path === nextEntry.path);
+  if (existingIndex === -1) {
+    return activate ? [nextEntry, ...previous] : [...previous, nextEntry];
+  }
+
+  const next = [...previous];
+  next.splice(existingIndex, 1, nextEntry);
+  if (!activate) {
+    return next;
+  }
+
+  return [nextEntry, ...next.filter((item) => item.path !== nextEntry.path)];
 }
 
 function defineEditorTheme(monaco: Monaco) {
@@ -294,7 +412,7 @@ function TreeNode({
 }
 
 function App() {
-  const [workspace, setWorkspace] = useState<WorkspaceNode | null>(null);
+  const [workspaces, setWorkspaces] = useState<WorkspaceEntry[]>([]);
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
   const [tabs, setTabs] = useState<FileTab[]>([]);
   const [activeTabPath, setActiveTabPath] = useState<string | null>(null);
@@ -305,35 +423,74 @@ function App() {
   const [caseSensitive, setCaseSensitive] = useState(false);
   const [wholeWord, setWholeWord] = useState(false);
   const [searchResults, setSearchResults] = useState<SearchHit[]>([]);
+  const [searchFeedback, setSearchFeedback] = useState(DEFAULT_SEARCH_FEEDBACK);
   const [searching, setSearching] = useState(false);
   const [markdownViewMode, setMarkdownViewMode] = useState<MarkdownViewMode>("split");
   const [markdownSplitRatio, setMarkdownSplitRatio] = useState(0.58);
   const [jsonlStatus, setJsonlStatus] = useState<FormatResult | null>(null);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [createFileOpen, setCreateFileOpen] = useState(false);
+  const [createFileName, setCreateFileName] = useState("");
+  const [createFileExtension, setCreateFileExtension] = useState<CreatableFileExtension>("md");
+  const [creatingFile, setCreatingFile] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(360);
 
+  const appShellRef = useRef<HTMLElement | null>(null);
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
   const monacoRef = useRef<Monaco | null>(null);
   const previewBodyRef = useRef<HTMLDivElement | null>(null);
   const editorLayoutRef = useRef<HTMLDivElement | null>(null);
+  const workspacesRef = useRef<WorkspaceEntry[]>([]);
   const tabsRef = useRef<FileTab[]>([]);
   const activeTabPathRef = useRef<string | null>(null);
   const viewStateRef = useRef<Record<string, EditorViewState>>({});
   const pendingViewStateRef = useRef<EditorViewState | null>(null);
   const sessionReadyRef = useRef(false);
   const toastIdRef = useRef(0);
-  const resizeStateRef = useRef<{ pointerId: number } | null>(null);
+  const resizeStateRef = useRef<{ pointerId: number; type: "markdown" | "sidebar" } | null>(null);
 
   useEffect(() => {
+    workspacesRef.current = workspaces;
     tabsRef.current = tabs;
     activeTabPathRef.current = activeTabPath;
-  }, [tabs, activeTabPath]);
+  }, [workspaces, tabs, activeTabPath]);
 
   const activeTab = tabs.find((tab) => tab.path === activeTabPath) ?? null;
+  const activeWorkspace =
+    workspaces.find((item) => item.path === workspacePath) ?? workspaces[0] ?? null;
   const markdownActive = activeTab ? isMarkdownFile(activeTab.extension) : false;
   const zoomEnabled = activeTab ? supportsTextZoom(activeTab.extension) : false;
   const showEditorPanel = !markdownActive || markdownViewMode !== "preview";
   const showPreviewPanel = markdownActive && markdownViewMode !== "editor";
+  const groupedResults = useMemo(() => groupHits(searchResults), [searchResults]);
+  const totalWorkspaceFiles = useMemo(
+    () => workspaces.reduce((total, item) => total + countEditableFiles(item.tree), 0),
+    [workspaces],
+  );
+  const workspaceFileCount = useMemo(
+    () => (activeWorkspace ? countEditableFiles(activeWorkspace.tree) : 0),
+    [activeWorkspace],
+  );
+  const createFileDirectory = useMemo(() => {
+    const activeFileWorkspacePath = activeTab?.workspacePath ?? null;
+    if (activeFileWorkspacePath && activeTabPath && isInsideWorkspace(activeTabPath, activeFileWorkspacePath)) {
+      return fileDirectory(activeTabPath);
+    }
+
+    if (!activeWorkspace?.path) {
+      return null;
+    }
+
+    return activeWorkspace.path;
+  }, [activeTab, activeTabPath, activeWorkspace]);
+  const createFileTargetPath =
+    createFileDirectory && stripKnownExtension(createFileName)
+      ? joinPath(
+          createFileDirectory,
+          `${stripKnownExtension(createFileName)}.${createFileExtension}`,
+        )
+      : null;
   const editorTheme =
     settings.appearance === "night"
       ? "studio-midnight"
@@ -348,6 +505,9 @@ function App() {
   const previewBodyStyle = markdownActive
     ? ({ fontSize: `${settings.textZoom}rem` } as CSSProperties)
     : undefined;
+  const shellLayoutStyle = {
+    "--sidebar-width": `${sidebarWidth}px`,
+  } as CSSProperties;
 
   function pushToast(message: string, tone: ToastTone = "info") {
     toastIdRef.current += 1;
@@ -418,7 +578,42 @@ function App() {
     preview.scrollTop = maxPreviewScroll * editorProgress;
   }
 
-  async function openFilePath(filePath: string, viewState?: EditorViewState | null) {
+  async function loadWorkspacePath(path: string, activate = true) {
+    const nextTree = await openWorkspace(path);
+    const nextEntry: WorkspaceEntry = {
+      name: nextTree.name,
+      path,
+      tree: nextTree,
+    };
+
+    setWorkspaces((previous) => replaceWorkspaceEntry(previous, nextEntry, false));
+    if (activate || !workspacePath) {
+      setWorkspacePath(path);
+    }
+  }
+
+  async function refreshWorkspacePath(path: string) {
+    const nextTree = await openWorkspace(path);
+    const nextEntry: WorkspaceEntry = {
+      name: nextTree.name,
+      path,
+      tree: nextTree,
+    };
+
+    setWorkspaces((previous) => replaceWorkspaceEntry(previous, nextEntry, false));
+  }
+
+  async function openFilePath(
+    filePath: string,
+    viewState?: EditorViewState | null,
+    preferredWorkspacePath?: string | null,
+  ) {
+    const resolvedWorkspacePath =
+      preferredWorkspacePath ??
+      findWorkspacePathForFile(
+        filePath,
+        workspacesRef.current.map((item) => item.path),
+      );
     const existing = tabsRef.current.find((tab) => tab.path === filePath);
     if (existing) {
       if (viewState) {
@@ -426,6 +621,11 @@ function App() {
         pendingViewStateRef.current = viewState;
       }
       setActiveTabPath(filePath);
+      if (existing.workspacePath) {
+        setWorkspacePath(existing.workspacePath);
+      } else if (resolvedWorkspacePath) {
+        setWorkspacePath(resolvedWorkspacePath);
+      }
       setRecentFiles((previous) => mergeRecentFiles(previous, filePath));
       return;
     }
@@ -434,6 +634,7 @@ function App() {
       const file = await readFile(filePath);
       const nextTab: FileTab = {
         path: file.path,
+        workspacePath: resolvedWorkspacePath,
         name: file.name,
         extension: file.extension,
         content: file.content,
@@ -450,6 +651,9 @@ function App() {
         setTabs((previous) => [...previous, nextTab]);
         setActiveTabPath(file.path);
       });
+      if (resolvedWorkspacePath) {
+        setWorkspacePath(resolvedWorkspacePath);
+      }
       setRecentFiles((previous) => mergeRecentFiles(previous, filePath));
     } catch (error) {
       pushToast(String(error), "error");
@@ -459,11 +663,13 @@ function App() {
   async function handleOpenWorkspace() {
     if (!isTauriRuntime) {
       try {
-        const nextWorkspace = await openWorkspace("/demo");
-        setWorkspace(nextWorkspace);
-        setWorkspacePath("/demo");
-        setCollapsedPaths(new Set());
-        pushToast("Loaded mock workspace preview", "success");
+        const nextPath =
+          workspacesRef.current.some((item) => item.path === "/demo") ? "/notes-lab" : "/demo";
+        await loadWorkspacePath(nextPath, true);
+        setSearchResults([]);
+        setSearchFeedback(DEFAULT_SEARCH_FEEDBACK);
+        setCreateFileOpen(false);
+        pushToast(`Loaded mock workspace: ${shortenPath(nextPath)}`, "success");
       } catch (error) {
         pushToast(String(error), "error");
       }
@@ -472,28 +678,55 @@ function App() {
 
     const selected = await open({
       directory: true,
-      multiple: false,
-      title: "Open workspace",
+      multiple: true,
+      title: "Open workspace folders",
     });
 
-    if (typeof selected !== "string") {
+    if (!selected) {
       return;
     }
 
     try {
-      const nextWorkspace = await openWorkspace(selected);
-      setWorkspace(nextWorkspace);
-      setWorkspacePath(selected);
-      setCollapsedPaths(new Set());
-      pushToast(`Workspace loaded: ${shortenPath(selected)}`, "success");
+      const paths = Array.isArray(selected) ? selected : [selected];
+      for (const [index, path] of paths.entries()) {
+        await loadWorkspacePath(path, index === paths.length - 1);
+      }
+      setSearchResults([]);
+      setSearchFeedback(DEFAULT_SEARCH_FEEDBACK);
+      setCreateFileOpen(false);
+      pushToast(
+        `Loaded ${paths.length} workspace${paths.length > 1 ? "s" : ""}`,
+        "success",
+      );
     } catch (error) {
       pushToast(String(error), "error");
     }
   }
 
+  function handleRemoveWorkspace(path: string) {
+    setWorkspaces((previous) => previous.filter((item) => item.path !== path));
+    setCollapsedPaths((previous) => {
+      const next = new Set(previous);
+      for (const value of previous) {
+        if (value === path || value.startsWith(`${path}/`)) {
+          next.delete(value);
+        }
+      }
+      return next;
+    });
+    setSearchResults([]);
+    setSearchFeedback(DEFAULT_SEARCH_FEEDBACK);
+    setCreateFileOpen(false);
+
+    if (workspacePath === path) {
+      const fallback = workspacesRef.current.find((item) => item.path !== path)?.path ?? null;
+      setWorkspacePath(fallback);
+    }
+  }
+
   async function handleOpenFiles() {
     if (!isTauriRuntime) {
-      await openFilePath("/demo/notes.txt");
+      await openFilePath("/demo/notes.txt", null, "/demo");
       return;
     }
 
@@ -503,7 +736,7 @@ function App() {
       filters: [
         {
           name: "Text formats",
-          extensions: ["txt", "md", "markdown", "json", "jsonl"],
+          extensions: [...SEARCHABLE_EXTENSIONS],
         },
       ],
     });
@@ -601,29 +834,78 @@ function App() {
     if (activeTabPathRef.current === filePath) {
       const fallback = nextTabs[index] ?? nextTabs[index - 1] ?? null;
       setActiveTabPath(fallback?.path ?? null);
+      if (fallback?.workspacePath) {
+        setWorkspacePath(fallback.workspacePath);
+      }
+    }
+  }
+
+  async function handleCreateFile(event?: FormEvent<HTMLFormElement>) {
+    event?.preventDefault();
+
+    if (!activeWorkspace?.path || !createFileDirectory) {
+      pushToast("Open a workspace before creating files.", "error");
+      return;
+    }
+
+    const baseName = stripKnownExtension(createFileName);
+    if (!baseName || baseName === "." || baseName === "..") {
+      pushToast("Enter a valid file name.", "error");
+      return;
+    }
+
+    if (/[/\\]/.test(baseName)) {
+      pushToast("File name cannot include folder separators.", "error");
+      return;
+    }
+
+    const nextPath = joinPath(createFileDirectory, `${baseName}.${createFileExtension}`);
+    if (workspaceContainsPath(activeWorkspace.tree, nextPath)) {
+      pushToast("A file with the same name already exists.", "error");
+      return;
+    }
+
+    setCreatingFile(true);
+    try {
+      await writeFile(nextPath, "");
+      await refreshWorkspacePath(activeWorkspace.path);
+      setCreateFileName("");
+      setCreateFileOpen(false);
+      await openFilePath(nextPath, null, activeWorkspace.path);
+      pushToast(`Created ${baseName}.${createFileExtension}`, "success");
+    } catch (error) {
+      pushToast(String(error), "error");
+    } finally {
+      setCreatingFile(false);
     }
   }
 
   async function handleSearch() {
-    if (!workspacePath || !searchText.trim()) {
+    if (!activeWorkspace?.path || !searchText.trim()) {
       setSearchResults([]);
+      setSearchFeedback(
+        activeWorkspace?.path ? "Enter text and click Run to search." : "Open a workspace to search.",
+      );
       return;
     }
 
     setSearching(true);
+    setSearchFeedback(`Searching ${activeWorkspace.name}...`);
     try {
+      const startedAt = performance.now();
+      const trimmedQuery = searchText.trim();
       const backendResults = await searchWorkspace(
-        workspacePath,
-        searchText.trim(),
+        activeWorkspace.path,
+        trimmedQuery,
         caseSensitive,
         wholeWord,
       );
       const openedWorkspaceTabs = tabsRef.current.filter((tab) =>
-        isInsideWorkspace(tab.path, workspacePath),
+        tab.workspacePath === activeWorkspace.path && isSearchableExtension(tab.extension),
       );
       const openedPaths = new Set(openedWorkspaceTabs.map((tab) => tab.path));
       const inMemoryResults = openedWorkspaceTabs.flatMap((tab) =>
-        searchContent(tab.path, tab.content, searchText.trim(), caseSensitive, wholeWord),
+        searchContent(tab.path, tab.content, trimmedQuery, caseSensitive, wholeWord),
       );
       const nextResults = [
         ...backendResults.filter((hit) => !openedPaths.has(hit.filePath)),
@@ -639,9 +921,17 @@ function App() {
         return left.columnStart - right.columnStart;
       });
 
-      setSearchResults(nextResults);
-      pushToast(`Found ${nextResults.length} matches`, "info");
+      const elapsed = Math.round(performance.now() - startedAt);
+      startTransition(() => {
+        setSearchResults(nextResults);
+      });
+      setSearchFeedback(
+        nextResults.length === 0
+          ? `No matches in ${activeWorkspace.name} · ${elapsed}ms`
+          : `Found ${nextResults.length} matches in ${new Set(nextResults.map((item) => item.filePath)).size} files inside ${activeWorkspace.name} · ${elapsed}ms`,
+      );
     } catch (error) {
+      setSearchFeedback("Search failed.");
       pushToast(String(error), "error");
     } finally {
       setSearching(false);
@@ -685,7 +975,7 @@ function App() {
 
     async function bootstrap() {
       try {
-        const session = await loadSession();
+        const [session, launchFiles] = await Promise.all([loadSession(), startupFiles()]);
         if (cancelled) {
           return;
         }
@@ -698,26 +988,53 @@ function App() {
         setRecentFiles(nextRecentFiles);
         setSettings(normalizeSettings(session.settings));
 
-        if (session.workspacePath) {
+        const restoredWorkspaces: WorkspaceEntry[] = [];
+        const missingWorkspaces: string[] = [];
+        const sessionWorkspacePaths = session.workspacePaths?.length
+          ? session.workspacePaths
+          : session.workspacePath
+            ? [session.workspacePath]
+            : [];
+
+        for (const path of sessionWorkspacePaths) {
           try {
-            const nextWorkspace = await openWorkspace(session.workspacePath);
-            if (!cancelled) {
-              setWorkspace(nextWorkspace);
-              setWorkspacePath(session.workspacePath);
-            }
+            const tree = await openWorkspace(path);
+            restoredWorkspaces.push({ name: tree.name, path, tree });
           } catch {
-            pushToast("Previous workspace is no longer available.", "error");
+            missingWorkspaces.push(path);
           }
         }
 
         const restoredTabs: FileTab[] = [];
         const missingTabs: string[] = [];
 
+        const allWorkspacePaths = [
+          ...restoredWorkspaces.map((item) => item.path),
+          ...launchFiles.map((filePath) => fileDirectory(filePath)),
+        ].filter((value, index, array) => array.indexOf(value) === index);
+
+        for (const path of allWorkspacePaths) {
+          if (restoredWorkspaces.some((item) => item.path === path)) {
+            continue;
+          }
+
+          try {
+            const tree = await openWorkspace(path);
+            restoredWorkspaces.push({ name: tree.name, path, tree });
+          } catch {
+            missingWorkspaces.push(path);
+          }
+        }
+
         for (const filePath of session.openTabs ?? []) {
           try {
             const file = await readFile(filePath);
             restoredTabs.push({
               path: file.path,
+              workspacePath: findWorkspacePathForFile(
+                file.path,
+                restoredWorkspaces.map((item) => item.path),
+              ),
               name: file.name,
               extension: file.extension,
               content: file.content,
@@ -734,6 +1051,16 @@ function App() {
         }
 
         startTransition(() => {
+          setWorkspaces(restoredWorkspaces);
+          setWorkspacePath(
+            restoredWorkspaces.some((item) => item.path === session.activeWorkspacePath)
+              ? session.activeWorkspacePath
+              : restoredWorkspaces.some((item) => item.path === session.workspacePath)
+                ? session.workspacePath
+                : restoredTabs.find((tab) => tab.workspacePath)?.workspacePath ??
+                  restoredWorkspaces[0]?.path ??
+                  null,
+          );
           setTabs(restoredTabs);
           setActiveTabPath(
             restoredTabs.some((tab) => tab.path === session.activeTab)
@@ -742,9 +1069,27 @@ function App() {
           );
         });
 
+        for (const filePath of launchFiles) {
+          if (restoredTabs.some((tab) => tab.path === filePath)) {
+            continue;
+          }
+          await openFilePath(
+            filePath,
+            null,
+            findWorkspacePathForFile(
+              filePath,
+              restoredWorkspaces.map((item) => item.path),
+            ),
+          );
+        }
+
         if (missingTabs.length > 0) {
           pushToast("Some previous tabs were removed because the files no longer exist.", "error");
         }
+        if (missingWorkspaces.length > 0) {
+          pushToast("Some previous workspaces were removed because the folders no longer exist.", "error");
+        }
+        setSearchFeedback(DEFAULT_SEARCH_FEEDBACK);
       } catch (error) {
         pushToast(String(error), "error");
       } finally {
@@ -771,6 +1116,8 @@ function App() {
 
       const state: SessionState = {
         workspacePath,
+        workspacePaths: workspaces.map((item) => item.path),
+        activeWorkspacePath: workspacePath,
         openTabs: tabs.map((tab) => tab.path),
         activeTab: activeTabPath,
         views: activeViews,
@@ -784,7 +1131,42 @@ function App() {
     return () => {
       window.clearTimeout(timer);
     };
-  }, [workspacePath, tabs, activeTabPath, recentFiles, settings]);
+  }, [workspacePath, workspaces, tabs, activeTabPath, recentFiles, settings]);
+
+  useEffect(() => {
+    if (activeTab?.workspacePath && activeTab.workspacePath !== workspacePath) {
+      setWorkspacePath(activeTab.workspacePath);
+    }
+  }, [activeTab?.path, activeTab?.workspacePath, workspacePath]);
+
+  useEffect(() => {
+    const workspacePaths = workspaces.map((item) => item.path);
+    if (workspacePaths.length === 0) {
+      return;
+    }
+
+    setTabs((previous) =>
+      previous.map((tab) => {
+        const nextWorkspacePath = findWorkspacePathForFile(tab.path, workspacePaths);
+        return nextWorkspacePath === tab.workspacePath
+          ? tab
+          : { ...tab, workspacePath: nextWorkspacePath };
+      }),
+    );
+  }, [workspaces]);
+
+  useEffect(() => {
+    if (!sessionReadyRef.current) {
+      return;
+    }
+
+    setSearchResults([]);
+    setSearchFeedback(
+      activeWorkspace?.path
+        ? `Ready to search inside ${activeWorkspace.name}.`
+        : DEFAULT_SEARCH_FEEDBACK,
+    );
+  }, [activeWorkspace?.path, activeWorkspace?.name]);
 
   useEffect(() => {
     if (!activeTab) {
@@ -881,7 +1263,7 @@ function App() {
   }, [markdownActive, markdownViewMode, activeTab?.content]);
 
   useEffect(() => {
-    function updateSplitRatio(clientX: number) {
+    function updateMarkdownSplitRatio(clientX: number) {
       const layout = editorLayoutRef.current;
       if (!layout) {
         return;
@@ -896,13 +1278,31 @@ function App() {
       setMarkdownSplitRatio(Math.min(0.75, Math.max(0.25, nextRatio)));
     }
 
+    function updateSidebarWidth(clientX: number) {
+      const shell = appShellRef.current;
+      if (!shell) {
+        return;
+      }
+
+      const bounds = shell.getBoundingClientRect();
+      const maxWidth = Math.min(bounds.width * 0.42, 520);
+      const minWidth = Math.min(440, Math.max(290, bounds.width * 0.22));
+      const nextWidth = Math.min(maxWidth, Math.max(minWidth, clientX - bounds.left));
+      setSidebarWidth(Math.round(nextWidth));
+    }
+
     function onPointerMove(event: PointerEvent) {
       if (!resizeStateRef.current) {
         return;
       }
 
       event.preventDefault();
-      updateSplitRatio(event.clientX);
+      if (resizeStateRef.current.type === "markdown") {
+        updateMarkdownSplitRatio(event.clientX);
+        return;
+      }
+
+      updateSidebarWidth(event.clientX);
     }
 
     function onPointerUp(event: PointerEvent) {
@@ -921,6 +1321,26 @@ function App() {
     return () => {
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerup", onPointerUp);
+    };
+  }, []);
+
+  useEffect(() => {
+    function syncSidebarWidth() {
+      const shell = appShellRef.current;
+      if (!shell) {
+        return;
+      }
+
+      const bounds = shell.getBoundingClientRect();
+      const maxWidth = Math.min(bounds.width * 0.42, 520);
+      const minWidth = Math.min(440, Math.max(290, bounds.width * 0.22));
+      setSidebarWidth((previous) => Math.round(Math.min(maxWidth, Math.max(minWidth, previous))));
+    }
+
+    syncSidebarWidth();
+    window.addEventListener("resize", syncSidebarWidth);
+    return () => {
+      window.removeEventListener("resize", syncSidebarWidth);
     };
   }, []);
 
@@ -977,7 +1397,6 @@ function App() {
     };
   }, [zoomEnabled, settings.textZoom, activeTab]);
 
-  const groupedResults = groupHits(searchResults);
   const splitLayoutStyle =
     showEditorPanel && showPreviewPanel
       ? ({
@@ -987,54 +1406,181 @@ function App() {
       : undefined;
 
   return (
-    <main className="app-shell" data-theme={settings.appearance}>
+    <main
+      className="app-shell"
+      data-theme={settings.appearance}
+      ref={appShellRef}
+      style={shellLayoutStyle}
+    >
       <aside className="sidebar">
-        <div className="brand-card">
-          <p className="eyebrow">Simple Notes Studio</p>
-          <h1>Quiet workspace for noisy text files.</h1>
-          <p className="brand-copy">
-            One window for JSON, JSONL, Markdown and plain text. Search fast. Restore your
-            session. Keep the interface out of the way.
-          </p>
-        </div>
-
-        <div className="sidebar-section">
+        <div className="sidebar-section sidebar-card">
           <div className="section-header">
-            <span>Workspace</span>
-            <button className="ghost-button" onClick={() => void handleOpenWorkspace()}>
-              Open folder
-            </button>
+            <div className="section-heading">
+              <span>Workspace</span>
+              <p>
+                {activeWorkspace
+                  ? `${workspaces.length} workspaces · ${workspaceFileCount} files in ${activeWorkspace.name}`
+                  : "Open folders to build a text-only workspace set"}
+              </p>
+            </div>
+            <div className="section-actions">
+              <button className="ghost-button" onClick={() => void handleOpenWorkspace()}>
+                Open folders
+              </button>
+              <button
+                className="ghost-button"
+                onClick={() => setCreateFileOpen((previous) => !previous)}
+                disabled={!activeWorkspace}
+              >
+                {createFileOpen ? "Close" : "New file"}
+              </button>
+            </div>
           </div>
-          <div className="workspace-meta">{workspacePath ?? "No workspace selected"}</div>
-          <div className="tree-panel">
-            {workspace ? (
-              <TreeNode
-                node={workspace}
-                level={0}
-                activePath={activeTabPath}
-                collapsedPaths={collapsedPaths}
-                onToggle={(path) =>
-                  setCollapsedPaths((previous) => {
-                    const next = new Set(previous);
-                    if (next.has(path)) {
-                      next.delete(path);
-                    } else {
-                      next.add(path);
+          <div className="workspace-summary">
+            <div className="workspace-path-pill">
+              {activeWorkspace?.path ?? "No workspace selected"}
+            </div>
+            <div className="workspace-stats">
+              <span>{workspaces.length} workspaces</span>
+              <span>{totalWorkspaceFiles} text files</span>
+              <span>{tabs.length} open tabs</span>
+              <span>{recentFiles.length} recent</span>
+            </div>
+          </div>
+          {createFileOpen ? (
+            <form className="create-file-form" onSubmit={(event) => void handleCreateFile(event)}>
+              <div className="create-file-row">
+                <input
+                  className="text-input"
+                  value={createFileName}
+                  onChange={(event) => setCreateFileName(event.currentTarget.value)}
+                  placeholder="untitled"
+                  autoFocus
+                />
+                <label className="select-wrap">
+                  <span>Type</span>
+                  <select
+                    className="select-input"
+                    value={createFileExtension}
+                    onChange={(event) =>
+                      setCreateFileExtension(event.currentTarget.value as CreatableFileExtension)
                     }
-                    return next;
-                  })
-                }
-                onOpen={(path) => void openFilePath(path)}
-              />
+                  >
+                    {CREATABLE_FILE_EXTENSIONS.map((extension) => (
+                      <option key={extension} value={extension}>
+                        .{extension}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <div className="workspace-meta">
+                {createFileTargetPath
+                  ? `Create in ${shortenPath(createFileDirectory ?? activeWorkspace?.path ?? "")} as ${createFileTargetPath.split("/").pop()}`
+                  : "Name the file. It will be created inside the active workspace."}
+              </div>
+              <div className="create-file-actions">
+                <button
+                  className="ghost-button"
+                  type="button"
+                  onClick={() => {
+                    setCreateFileOpen(false);
+                    setCreateFileName("");
+                  }}
+                >
+                  Cancel
+                </button>
+                <button className="toolbar-button" type="submit" disabled={creatingFile}>
+                  {creatingFile ? "Creating" : "Create"}
+                </button>
+              </div>
+            </form>
+          ) : null}
+          <div className="tree-panel">
+            {workspaces.length > 0 ? (
+              workspaces.map((entry) => {
+                const collapsed = collapsedPaths.has(entry.path);
+                return (
+                  <div
+                    className={`workspace-group ${workspacePath === entry.path ? "active" : ""}`}
+                    key={entry.path}
+                  >
+                    <div className="workspace-group-header">
+                      <button
+                        className="workspace-group-select"
+                        onClick={() => setWorkspacePath(entry.path)}
+                      >
+                        <strong>{entry.name}</strong>
+                        <span>{countEditableFiles(entry.tree)} files</span>
+                      </button>
+                      <div className="workspace-group-actions">
+                        <button
+                          className="workspace-mini-button"
+                          onClick={() =>
+                            setCollapsedPaths((previous) => {
+                              const next = new Set(previous);
+                              if (next.has(entry.path)) {
+                                next.delete(entry.path);
+                              } else {
+                                next.add(entry.path);
+                              }
+                              return next;
+                            })
+                          }
+                        >
+                          {collapsed ? ">" : "v"}
+                        </button>
+                        <button
+                          className="workspace-mini-button"
+                          onClick={() => handleRemoveWorkspace(entry.path)}
+                        >
+                          x
+                        </button>
+                      </div>
+                    </div>
+                    <div className="workspace-group-path">{entry.path}</div>
+                    {!collapsed
+                      ? entry.tree.children.map((child) => (
+                          <TreeNode
+                            key={child.path}
+                            node={child}
+                            level={1}
+                            activePath={activeTabPath}
+                            collapsedPaths={collapsedPaths}
+                            onToggle={(path) =>
+                              setCollapsedPaths((previous) => {
+                                const next = new Set(previous);
+                                if (next.has(path)) {
+                                  next.delete(path);
+                                } else {
+                                  next.add(path);
+                                }
+                                return next;
+                              })
+                            }
+                            onOpen={(path) => void openFilePath(path, null, entry.path)}
+                          />
+                        ))
+                      : null}
+                  </div>
+                );
+              })
             ) : (
-              <div className="empty-panel">Open a folder to browse files as a tree.</div>
+              <div className="empty-panel">Open folders to browse text files as grouped trees.</div>
             )}
           </div>
         </div>
 
-        <div className="sidebar-section">
+        <div className="sidebar-section sidebar-card">
           <div className="section-header">
-            <span>Search</span>
+            <div className="section-heading">
+              <span>Search</span>
+              <p>
+                {activeWorkspace
+                  ? `Search only inside ${activeWorkspace.name} to keep large folders responsive`
+                  : "Pick a workspace first, then run a scoped search"}
+              </p>
+            </div>
             <button className="ghost-button" onClick={() => void handleSearch()} disabled={searching}>
               {searching ? "Searching" : "Run"}
             </button>
@@ -1044,30 +1590,51 @@ function App() {
             value={searchText}
             onChange={(event) => setSearchText(event.currentTarget.value)}
             placeholder="Search workspace text"
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                void handleSearch();
+              }
+            }}
           />
-          <label className="toggle">
-            <input
-              type="checkbox"
-              checked={caseSensitive}
-              onChange={(event) => setCaseSensitive(event.currentTarget.checked)}
-            />
-            <span>Case sensitive</span>
-          </label>
-          <label className="toggle">
-            <input
-              type="checkbox"
-              checked={wholeWord}
-              onChange={(event) => setWholeWord(event.currentTarget.checked)}
-            />
-            <span>Whole word</span>
-          </label>
+          <div className="search-options">
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={caseSensitive}
+                onChange={(event) => setCaseSensitive(event.currentTarget.checked)}
+              />
+              <span>Case sensitive</span>
+            </label>
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={wholeWord}
+                onChange={(event) => setWholeWord(event.currentTarget.checked)}
+              />
+              <span>Whole word</span>
+            </label>
+          </div>
+          <div className="search-feedback">{searchFeedback}</div>
           <div className="search-results">
             {groupedResults.length === 0 ? (
               <div className="empty-panel">Search results appear here.</div>
             ) : (
               groupedResults.map(([filePath, hits]) => (
                 <div className="search-group" key={filePath}>
-                  <button className="search-file" onClick={() => void openFilePath(filePath)}>
+                  <button
+                    className="search-file"
+                    onClick={() =>
+                      void openFilePath(
+                        filePath,
+                        null,
+                        findWorkspacePathForFile(
+                          filePath,
+                          workspaces.map((item) => item.path),
+                        ),
+                      )
+                    }
+                  >
                     {shortenPath(filePath)} <span>{hits.length}</span>
                   </button>
                   {hits.map((hit) => (
@@ -1082,7 +1649,14 @@ function App() {
                           scrollTop: 0,
                           scrollLeft: 0,
                         };
-                        void openFilePath(hit.filePath, pendingViewStateRef.current);
+                        void openFilePath(
+                          hit.filePath,
+                          pendingViewStateRef.current,
+                          findWorkspacePathForFile(
+                            hit.filePath,
+                            workspaces.map((item) => item.path),
+                          ),
+                        );
                       }}
                     >
                       <strong>L{hit.lineNumber}</strong>
@@ -1095,9 +1669,12 @@ function App() {
           </div>
         </div>
 
-        <div className="sidebar-section">
+        <div className="sidebar-section sidebar-card">
           <div className="section-header">
-            <span>Recent</span>
+            <div className="section-heading">
+              <span>Recent</span>
+              <p>Jump back into files you touched recently</p>
+            </div>
             <button className="ghost-button" onClick={() => void handleOpenFiles()}>
               Open files
             </button>
@@ -1110,7 +1687,16 @@ function App() {
                 <button
                   className="recent-item"
                   key={filePath}
-                  onClick={() => void openFilePath(filePath)}
+                  onClick={() =>
+                    void openFilePath(
+                      filePath,
+                      null,
+                      findWorkspacePathForFile(
+                        filePath,
+                        workspaces.map((item) => item.path),
+                      ),
+                    )
+                  }
                 >
                   <span>{shortenPath(filePath)}</span>
                 </button>
@@ -1120,11 +1706,29 @@ function App() {
         </div>
       </aside>
 
+      <div
+        className="shell-splitter"
+        aria-label="Resize sidebar"
+        onPointerDown={(event) => {
+          resizeStateRef.current = { pointerId: event.pointerId, type: "sidebar" };
+          document.body.style.cursor = "col-resize";
+          document.body.style.userSelect = "none";
+        }}
+        role="separator"
+      />
+
       <section className="workspace-shell">
         <header className="toolbar">
           <div className="toolbar-left">
             <button className="toolbar-button" onClick={() => void handleOpenFiles()}>
               Open file
+            </button>
+            <button
+              className="toolbar-button"
+              onClick={() => setCreateFileOpen(true)}
+              disabled={!activeWorkspace}
+            >
+              New file
             </button>
             <button className="toolbar-button" onClick={() => void handleSaveActiveTab()} disabled={!activeTab}>
               Save
@@ -1273,6 +1877,8 @@ function App() {
                       fontSize: editorFontSize,
                       lineHeight: editorLineHeight,
                       smoothScrolling: true,
+                      cursorBlinking: "smooth",
+                      cursorSmoothCaretAnimation: "on",
                       automaticLayout: true,
                       padding: { top: 18, bottom: 18 },
                       fontFamily:
@@ -1289,7 +1895,7 @@ function App() {
                 className="editor-splitter"
                 aria-label="Resize markdown split view"
                 onPointerDown={(event) => {
-                  resizeStateRef.current = { pointerId: event.pointerId };
+                  resizeStateRef.current = { pointerId: event.pointerId, type: "markdown" };
                   document.body.style.cursor = "col-resize";
                   document.body.style.userSelect = "none";
                 }}

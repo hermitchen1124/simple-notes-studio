@@ -48,8 +48,16 @@ export type AppSettings = {
   textZoom: number;
 };
 
+export type WorkspaceEntry = {
+  name: string;
+  path: string;
+  tree: WorkspaceNode;
+};
+
 export type SessionState = {
   workspacePath: string | null;
+  workspacePaths: string[];
+  activeWorkspacePath: string | null;
   openTabs: string[];
   activeTab: string | null;
   views: EditorViewState[];
@@ -59,6 +67,7 @@ export type SessionState = {
 
 export type FileTab = {
   path: string;
+  workspacePath: string | null;
   name: string;
   extension: string;
   content: string;

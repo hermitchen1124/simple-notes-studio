@@ -2,6 +2,7 @@ use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
+    env,
     fs,
     path::{Path, PathBuf},
 };
@@ -9,6 +10,17 @@ use tauri::{AppHandle, Manager};
 use walkdir::{DirEntry, WalkDir};
 
 const SKIPPED_DIRS: &[&str] = &[".git", "node_modules", "dist", "target"];
+const SUPPORTED_TEXT_EXTENSIONS: &[&str] = &[
+    "txt",
+    "md",
+    "markdown",
+    "json",
+    "jsonl",
+    "yaml",
+    "yml",
+    "toml",
+    "log",
+];
 const MAX_SEARCH_BYTES: u64 = 1_500_000;
 const MAX_SEARCH_RESULTS: usize = 1_500;
 
@@ -86,7 +98,12 @@ impl Default for AppSettings {
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 struct SessionState {
+    #[serde(default)]
     workspace_path: Option<String>,
+    #[serde(default)]
+    workspace_paths: Vec<String>,
+    #[serde(default)]
+    active_workspace_path: Option<String>,
     open_tabs: Vec<String>,
     active_tab: Option<String>,
     views: Vec<EditorViewState>,
@@ -105,7 +122,7 @@ fn open_workspace(path: String) -> Result<WorkspaceNode, String> {
         return Err(format!("Path is not a directory: {path}"));
     }
 
-    build_workspace_node(&root)
+    build_workspace_node(&root, true)?.ok_or_else(|| format!("Workspace not found: {path}"))
 }
 
 #[tauri::command]
@@ -165,6 +182,10 @@ fn search_workspace(
         .filter_map(Result::ok)
     {
         if !entry.file_type().is_file() {
+            continue;
+        }
+
+        if !is_supported_text_file(entry.path()) {
             continue;
         }
 
@@ -276,35 +297,62 @@ fn load_session(app: AppHandle) -> Result<SessionState, String> {
     read_session_file(&session_path)
 }
 
-fn build_workspace_node(path: &Path) -> Result<WorkspaceNode, String> {
+#[tauri::command]
+fn startup_files() -> Vec<String> {
+    env::args_os()
+        .skip(1)
+        .map(PathBuf::from)
+        .filter(|path| path.is_file() && is_supported_text_file(path))
+        .map(|path| path.to_string_lossy().to_string())
+        .collect()
+}
+
+fn build_workspace_node(path: &Path, include_empty_dirs: bool) -> Result<Option<WorkspaceNode>, String> {
     let metadata = fs::metadata(path)
         .map_err(|error| format!("Failed to read metadata for {}: {error}", path.display()))?;
 
+    if metadata.is_file() {
+        if !is_supported_text_file(path) {
+            return Ok(None);
+        }
+
+        return Ok(Some(WorkspaceNode {
+            name: file_name(path),
+            path: path.to_string_lossy().to_string(),
+            is_dir: false,
+            children: Vec::new(),
+        }));
+    }
+
     let mut children = Vec::new();
-    if metadata.is_dir() {
-        let mut entries = fs::read_dir(path)
-            .map_err(|error| format!("Failed to list {}: {error}", path.display()))?
-            .filter_map(Result::ok)
-            .collect::<Vec<_>>();
+    let mut entries = fs::read_dir(path)
+        .map_err(|error| format!("Failed to list {}: {error}", path.display()))?
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
 
-        entries.sort_by(|left, right| compare_dir_entries(&left.path(), &right.path()));
+    entries.sort_by(|left, right| compare_dir_entries(&left.path(), &right.path()));
 
-        for entry in entries {
-            let entry_path = entry.path();
-            if should_skip_path(&entry_path) {
-                continue;
-            }
+    for entry in entries {
+        let entry_path = entry.path();
+        if should_skip_path(&entry_path) {
+            continue;
+        }
 
-            children.push(build_workspace_node(&entry_path)?);
+        if let Some(child) = build_workspace_node(&entry_path, false)? {
+            children.push(child);
         }
     }
 
-    Ok(WorkspaceNode {
+    if !include_empty_dirs && children.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(WorkspaceNode {
         name: file_name(path),
         path: path.to_string_lossy().to_string(),
-        is_dir: metadata.is_dir(),
+        is_dir: true,
         children,
-    })
+    }))
 }
 
 fn compare_dir_entries(left: &Path, right: &Path) -> Ordering {
@@ -343,6 +391,10 @@ fn file_extension(path: &Path) -> String {
         .to_lowercase()
 }
 
+fn is_supported_text_file(path: &Path) -> bool {
+    SUPPORTED_TEXT_EXTENSIONS.contains(&file_extension(path).as_str())
+}
+
 fn session_file_path(app: &AppHandle) -> Result<PathBuf, String> {
     let app_dir = app
         .path()
@@ -369,7 +421,30 @@ fn read_session_file(path: &Path) -> Result<SessionState, String> {
         .map_err(|error| format!("Failed to read session file {}: {error}", path.display()))?;
 
     serde_json::from_str::<SessionState>(&content)
+        .map(normalize_session_state)
         .map_err(|error| format!("Failed to parse session file {}: {error}", path.display()))
+}
+
+fn normalize_session_state(mut state: SessionState) -> SessionState {
+    if state.workspace_paths.is_empty() {
+        if let Some(path) = state.workspace_path.clone() {
+            state.workspace_paths.push(path);
+        }
+    }
+
+    if state.active_workspace_path.is_none() {
+        state.active_workspace_path = state
+            .workspace_path
+            .clone()
+            .or_else(|| state.workspace_paths.first().cloned());
+    }
+
+    state.workspace_path = state
+        .active_workspace_path
+        .clone()
+        .or_else(|| state.workspace_paths.first().cloned());
+
+    state
 }
 
 struct Searcher {
@@ -447,7 +522,8 @@ pub fn run() {
             validate_and_format_json,
             validate_and_format_jsonl,
             save_session,
-            load_session
+            load_session,
+            startup_files
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -509,11 +585,51 @@ mod tests {
     }
 
     #[test]
+    fn workspace_search_skips_unsupported_extensions() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join("notes.md"), "Section 1\nSection 2").expect("write markdown");
+        fs::write(dir.path().join("archive.log"), "Section 3").expect("write log");
+        fs::write(dir.path().join("script.ts"), "Section 4").expect("write typescript");
+
+        let hits = search_workspace(
+            dir.path().to_string_lossy().to_string(),
+            "Section".into(),
+            false,
+            false,
+        )
+        .expect("search workspace");
+
+        assert_eq!(hits.len(), 3);
+        assert!(hits.iter().all(|hit| !hit.file_path.ends_with("script.ts")));
+    }
+
+    #[test]
+    fn workspace_tree_keeps_only_supported_text_files() {
+        let dir = tempdir().expect("tempdir");
+        let docs = dir.path().join("docs");
+        let src = dir.path().join("src");
+        fs::create_dir_all(&docs).expect("mkdir docs");
+        fs::create_dir_all(&src).expect("mkdir src");
+        fs::write(docs.join("notes.toml"), "title = \"demo\"").expect("write toml");
+        fs::write(src.join("main.rs"), "fn main() {}").expect("write rust");
+
+        let tree = build_workspace_node(dir.path(), true)
+            .expect("tree")
+            .expect("root node");
+
+        assert_eq!(tree.children.len(), 1);
+        assert_eq!(tree.children[0].name, "docs");
+        assert_eq!(tree.children[0].children[0].name, "notes.toml");
+    }
+
+    #[test]
     fn session_roundtrip_keeps_tabs_and_recent_files() {
         let dir = tempdir().expect("tempdir");
         let session_path = dir.path().join("session.json");
         let session = SessionState {
             workspace_path: Some("/tmp/demo".into()),
+            workspace_paths: vec!["/tmp/demo".into(), "/tmp/notes".into()],
+            active_workspace_path: Some("/tmp/demo".into()),
             open_tabs: vec!["/tmp/demo/a.md".into()],
             active_tab: Some("/tmp/demo/a.md".into()),
             views: vec![EditorViewState {
@@ -538,6 +654,7 @@ mod tests {
         assert_eq!(loaded.recent_files.len(), 1);
         assert_eq!(loaded.settings.appearance, "night");
         assert_eq!(loaded.settings.text_zoom, 1.2);
+        assert_eq!(loaded.workspace_paths.len(), 2);
     }
 
     #[test]
@@ -546,9 +663,12 @@ mod tests {
         let folder = dir.path().join("folder");
         let file = dir.path().join("zeta.txt");
         fs::create_dir_all(&folder).expect("mkdir");
+        fs::write(folder.join("alpha.txt"), "nested").expect("write nested");
         fs::write(&file, "hello").expect("write");
 
-        let tree = build_workspace_node(dir.path()).expect("tree");
+        let tree = build_workspace_node(dir.path(), true)
+            .expect("tree")
+            .expect("root node");
 
         assert_eq!(tree.children.len(), 2);
         assert!(tree.children[0].is_dir);
