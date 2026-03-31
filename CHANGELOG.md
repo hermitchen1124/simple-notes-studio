@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.4
+
+- Fixed Finder `Open With` so opening a file while the app is already running now creates or focuses the correct tab instead of only activating the window.
+- Stopped external file opens from auto-creating ad-hoc workspaces; files opened from Finder now stay as standalone tabs unless they already belong to an open workspace.
+- Canonicalized external file paths to prevent duplicate tabs for the same file when macOS provides different path representations such as `/var/...` and `/private/var/...`.
+
 ## 0.1.3
 
 - Added multi-workspace support so multiple folders can stay open at the same time and the active workspace drives search scope.

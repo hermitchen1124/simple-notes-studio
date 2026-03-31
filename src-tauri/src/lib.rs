@@ -4,9 +4,13 @@ use std::{
     cmp::Ordering,
     env,
     fs,
+    sync::{
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+        Mutex,
+    },
     path::{Path, PathBuf},
 };
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State, Url};
 use walkdir::{DirEntry, WalkDir};
 
 const SKIPPED_DIRS: &[&str] = &[".git", "node_modules", "dist", "target"];
@@ -23,6 +27,7 @@ const SUPPORTED_TEXT_EXTENSIONS: &[&str] = &[
 ];
 const MAX_SEARCH_BYTES: u64 = 1_500_000;
 const MAX_SEARCH_RESULTS: usize = 1_500;
+const OPEN_FILES_EVENT: &str = "studio://open-files";
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
@@ -112,9 +117,21 @@ struct SessionState {
     settings: AppSettings,
 }
 
+#[derive(Default)]
+struct OpenRequestState {
+    frontend_ready: AtomicBool,
+    pending_paths: Mutex<Vec<String>>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct OpenFilesPayload {
+    paths: Vec<String>,
+}
+
 #[tauri::command]
 fn open_workspace(path: String) -> Result<WorkspaceNode, String> {
-    let root = PathBuf::from(&path);
+    let root = normalize_existing_path(Path::new(&path));
     if !root.exists() {
         return Err(format!("Workspace not found: {path}"));
     }
@@ -127,12 +144,12 @@ fn open_workspace(path: String) -> Result<WorkspaceNode, String> {
 
 #[tauri::command]
 fn read_file(path: String) -> Result<FileContent, String> {
-    let file_path = PathBuf::from(&path);
+    let file_path = normalize_existing_path(Path::new(&path));
     let content = fs::read_to_string(&file_path)
         .map_err(|error| format!("Failed to read file {path}: {error}"))?;
 
     Ok(FileContent {
-        path,
+        path: file_path.to_string_lossy().to_string(),
         name: file_name(&file_path),
         extension: file_extension(&file_path),
         content,
@@ -150,8 +167,10 @@ fn write_file(path: String, content: String) -> Result<SaveResult, String> {
     fs::write(&file_path, content.as_bytes())
         .map_err(|error| format!("Failed to write file {path}: {error}"))?;
 
+    let normalized_path = normalize_existing_path(&file_path);
+
     Ok(SaveResult {
-        path,
+        path: normalized_path.to_string_lossy().to_string(),
         bytes_written: content.len(),
     })
 }
@@ -163,7 +182,7 @@ fn search_workspace(
     case_sensitive: bool,
     whole_word: bool,
 ) -> Result<Vec<SearchHit>, String> {
-    let root_path = PathBuf::from(&root);
+    let root_path = normalize_existing_path(Path::new(&root));
     if !root_path.exists() || !root_path.is_dir() {
         return Err(format!("Workspace not found: {root}"));
     }
@@ -299,12 +318,20 @@ fn load_session(app: AppHandle) -> Result<SessionState, String> {
 
 #[tauri::command]
 fn startup_files() -> Vec<String> {
-    env::args_os()
-        .skip(1)
-        .map(PathBuf::from)
-        .filter(|path| path.is_file() && is_supported_text_file(path))
-        .map(|path| path.to_string_lossy().to_string())
-        .collect()
+    supported_file_paths(env::args_os().skip(1).map(PathBuf::from))
+}
+
+#[tauri::command]
+fn take_pending_open_files(state: State<'_, OpenRequestState>) -> Vec<String> {
+    state
+        .frontend_ready
+        .store(true, AtomicOrdering::SeqCst);
+
+    let mut pending_paths = state
+        .pending_paths
+        .lock()
+        .expect("pending open files lock poisoned");
+    dedupe_file_paths(std::mem::take(&mut *pending_paths))
 }
 
 fn build_workspace_node(path: &Path, include_empty_dirs: bool) -> Result<Option<WorkspaceNode>, String> {
@@ -395,6 +422,37 @@ fn is_supported_text_file(path: &Path) -> bool {
     SUPPORTED_TEXT_EXTENSIONS.contains(&file_extension(path).as_str())
 }
 
+fn normalize_existing_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn supported_file_paths<I>(paths: I) -> Vec<String>
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    dedupe_file_paths(
+        paths.into_iter()
+            .map(|path| normalize_existing_path(&path))
+            .filter(|path| path.is_file() && is_supported_text_file(path))
+            .map(|path| path.to_string_lossy().to_string())
+            .collect(),
+    )
+}
+
+fn supported_file_paths_from_urls(urls: Vec<Url>) -> Vec<String> {
+    supported_file_paths(urls.into_iter().filter_map(|url| url.to_file_path().ok()))
+}
+
+fn dedupe_file_paths(paths: Vec<String>) -> Vec<String> {
+    let mut deduped = Vec::new();
+    for path in paths {
+        if !deduped.contains(&path) {
+            deduped.push(path);
+        }
+    }
+    deduped
+}
+
 fn session_file_path(app: &AppHandle) -> Result<PathBuf, String> {
     let app_dir = app
         .path()
@@ -445,6 +503,46 @@ fn normalize_session_state(mut state: SessionState) -> SessionState {
         .or_else(|| state.workspace_paths.first().cloned());
 
     state
+}
+
+fn focus_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+fn emit_or_queue_open_files(app: &AppHandle, paths: Vec<String>) {
+    if paths.is_empty() {
+        return;
+    }
+
+    let open_request_state = app.state::<OpenRequestState>();
+    if open_request_state
+        .frontend_ready
+        .load(AtomicOrdering::SeqCst)
+    {
+        let _ = app.emit(
+            OPEN_FILES_EVENT,
+            OpenFilesPayload {
+                paths: paths.clone(),
+            },
+        );
+    } else {
+        let mut pending_paths = open_request_state
+            .pending_paths
+            .lock()
+            .expect("pending open files lock poisoned");
+        *pending_paths = dedupe_file_paths(
+            pending_paths
+                .iter()
+                .cloned()
+                .chain(paths.iter().cloned())
+                .collect(),
+        );
+    }
+
+    focus_main_window(app);
 }
 
 struct Searcher {
@@ -512,6 +610,7 @@ impl Searcher {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(OpenRequestState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
@@ -523,10 +622,21 @@ pub fn run() {
             validate_and_format_jsonl,
             save_session,
             load_session,
-            startup_files
+            startup_files,
+            take_pending_open_files
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| match event {
+            RunEvent::Opened { urls } => {
+                emit_or_queue_open_files(app, supported_file_paths_from_urls(urls));
+            }
+            #[cfg(target_os = "macos")]
+            RunEvent::Reopen { .. } => {
+                focus_main_window(app);
+            }
+            _ => {}
+        });
 }
 
 #[cfg(test)]
@@ -673,5 +783,25 @@ mod tests {
         assert_eq!(tree.children.len(), 2);
         assert!(tree.children[0].is_dir);
         assert_eq!(tree.children[1].name, "zeta.txt");
+    }
+
+    #[test]
+    fn supported_file_paths_from_urls_keeps_only_supported_files() {
+        let dir = tempdir().expect("tempdir");
+        let notes = dir.path().join("notes.md");
+        let script = dir.path().join("script.ts");
+        fs::write(&notes, "# notes").expect("write notes");
+        fs::write(&script, "console.log('x')").expect("write script");
+
+        let urls = vec![
+            Url::from_file_path(&notes).expect("notes url"),
+            Url::from_file_path(&script).expect("script url"),
+            Url::from_file_path(&notes).expect("duplicate notes url"),
+        ];
+
+        let paths = supported_file_paths_from_urls(urls);
+        let expected = normalize_existing_path(&notes).to_string_lossy().to_string();
+
+        assert_eq!(paths, vec![expected]);
     }
 }

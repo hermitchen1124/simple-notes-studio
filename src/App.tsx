@@ -14,12 +14,14 @@ import {
 import {
   DEFAULT_SETTINGS,
   isTauriRuntime,
+  listenForOpenFiles,
   loadSession,
   normalizeSettings,
   openWorkspace,
   readFile,
   saveSession,
   searchWorkspace,
+  takePendingOpenFiles,
   startupFiles,
   validateAndFormatJson,
   validateAndFormatJsonl,
@@ -129,6 +131,10 @@ function shortenPath(filePath: string) {
 
 function mergeRecentFiles(previous: string[], nextPath: string) {
   return [nextPath, ...previous.filter((item) => item !== nextPath)].slice(0, 10);
+}
+
+function uniquePaths(paths: string[]) {
+  return paths.filter((path, index) => paths.indexOf(path) === index);
 }
 
 function groupHits(hits: SearchHit[]) {
@@ -447,6 +453,7 @@ function App() {
   const viewStateRef = useRef<Record<string, EditorViewState>>({});
   const pendingViewStateRef = useRef<EditorViewState | null>(null);
   const sessionReadyRef = useRef(false);
+  const pendingExternalOpenFilesRef = useRef<string[]>([]);
   const toastIdRef = useRef(0);
   const resizeStateRef = useRef<{ pointerId: number; type: "markdown" | "sidebar" } | null>(null);
 
@@ -607,31 +614,51 @@ function App() {
     filePath: string,
     viewState?: EditorViewState | null,
     preferredWorkspacePath?: string | null,
+    attachToWorkspace = true,
   ) {
-    const resolvedWorkspacePath =
-      preferredWorkspacePath ??
-      findWorkspacePathForFile(
-        filePath,
-        workspacesRef.current.map((item) => item.path),
-      );
-    const existing = tabsRef.current.find((tab) => tab.path === filePath);
+    const existing = tabsRef.current.find(
+      (tab) => normalizePath(tab.path) === normalizePath(filePath),
+    );
     if (existing) {
       if (viewState) {
-        viewStateRef.current[filePath] = viewState;
-        pendingViewStateRef.current = viewState;
+        const nextViewState = { ...viewState, filePath: existing.path };
+        viewStateRef.current[existing.path] = nextViewState;
+        pendingViewStateRef.current = nextViewState;
       }
-      setActiveTabPath(filePath);
+      setActiveTabPath(existing.path);
       if (existing.workspacePath) {
         setWorkspacePath(existing.workspacePath);
-      } else if (resolvedWorkspacePath) {
-        setWorkspacePath(resolvedWorkspacePath);
       }
-      setRecentFiles((previous) => mergeRecentFiles(previous, filePath));
+      setRecentFiles((previous) => mergeRecentFiles(previous, existing.path));
       return;
     }
 
     try {
       const file = await readFile(filePath);
+      const resolvedWorkspacePath = attachToWorkspace
+        ? preferredWorkspacePath ??
+          findWorkspacePathForFile(
+            file.path,
+            workspacesRef.current.map((item) => item.path),
+          )
+        : null;
+      const existingTab = tabsRef.current.find(
+        (tab) => normalizePath(tab.path) === normalizePath(file.path),
+      );
+      if (existingTab) {
+        if (viewState) {
+          const nextViewState = { ...viewState, filePath: existingTab.path };
+          viewStateRef.current[existingTab.path] = nextViewState;
+          pendingViewStateRef.current = nextViewState;
+        }
+        setActiveTabPath(existingTab.path);
+        if (existingTab.workspacePath) {
+          setWorkspacePath(existingTab.workspacePath);
+        }
+        setRecentFiles((previous) => mergeRecentFiles(previous, existingTab.path));
+        return;
+      }
+
       const nextTab: FileTab = {
         path: file.path,
         workspacePath: resolvedWorkspacePath,
@@ -643,18 +670,23 @@ function App() {
       };
 
       if (viewState) {
-        viewStateRef.current[filePath] = viewState;
-        pendingViewStateRef.current = viewState;
+        const nextViewState = { ...viewState, filePath: file.path };
+        viewStateRef.current[file.path] = nextViewState;
+        pendingViewStateRef.current = nextViewState;
       }
 
       startTransition(() => {
-        setTabs((previous) => [...previous, nextTab]);
+        setTabs((previous) =>
+          previous.some((tab) => normalizePath(tab.path) === normalizePath(file.path))
+            ? previous
+            : [...previous, nextTab],
+        );
         setActiveTabPath(file.path);
       });
       if (resolvedWorkspacePath) {
         setWorkspacePath(resolvedWorkspacePath);
       }
-      setRecentFiles((previous) => mergeRecentFiles(previous, filePath));
+      setRecentFiles((previous) => mergeRecentFiles(previous, file.path));
     } catch (error) {
       pushToast(String(error), "error");
     }
@@ -748,6 +780,17 @@ function App() {
     const paths = Array.isArray(selected) ? selected : [selected];
     for (const filePath of paths) {
       await openFilePath(filePath);
+    }
+  }
+
+  async function handleExternalOpenFiles(filePaths: string[]) {
+    const nextPaths = uniquePaths(filePaths);
+    if (nextPaths.length === 0) {
+      return;
+    }
+
+    for (const filePath of nextPaths) {
+      await openFilePath(filePath, null, null, false);
     }
   }
 
@@ -971,6 +1014,56 @@ function App() {
   };
 
   useEffect(() => {
+    if (!isTauriRuntime) {
+      return;
+    }
+
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+
+    async function bindOpenFilesListener() {
+      unlisten = await listenForOpenFiles((paths) => {
+        const nextPaths = uniquePaths(paths);
+        if (nextPaths.length === 0) {
+          return;
+        }
+
+        if (!sessionReadyRef.current) {
+          pendingExternalOpenFilesRef.current = uniquePaths([
+            ...pendingExternalOpenFilesRef.current,
+            ...nextPaths,
+          ]);
+          return;
+        }
+
+        void handleExternalOpenFiles(nextPaths);
+      });
+
+      const pendingPaths = await takePendingOpenFiles();
+      if (cancelled || pendingPaths.length === 0) {
+        return;
+      }
+
+      pendingExternalOpenFilesRef.current = uniquePaths([
+        ...pendingExternalOpenFilesRef.current,
+        ...pendingPaths,
+      ]);
+      if (sessionReadyRef.current) {
+        const queuedPaths = [...pendingExternalOpenFilesRef.current];
+        pendingExternalOpenFilesRef.current = [];
+        void handleExternalOpenFiles(queuedPaths);
+      }
+    }
+
+    void bindOpenFilesListener();
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
 
     async function bootstrap() {
@@ -1094,6 +1187,11 @@ function App() {
         pushToast(String(error), "error");
       } finally {
         sessionReadyRef.current = true;
+        const queuedPaths = [...pendingExternalOpenFilesRef.current];
+        pendingExternalOpenFilesRef.current = [];
+        if (!cancelled && queuedPaths.length > 0) {
+          void handleExternalOpenFiles(queuedPaths);
+        }
       }
     }
 

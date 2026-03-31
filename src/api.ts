@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppSettings,
   EditorViewState,
@@ -27,6 +28,11 @@ const SUPPORTED_EXTENSIONS = [
 const DEFAULT_SETTINGS: AppSettings = {
   appearance: "warm",
   textZoom: 1,
+};
+const OPEN_FILES_EVENT = "studio://open-files";
+
+type OpenFilesPayload = {
+  paths?: string[];
 };
 
 const defaultMockFiles: Record<string, string> = {
@@ -391,6 +397,31 @@ function startupFiles() {
   return invoke<string[]>("startup_files");
 }
 
+function takePendingOpenFiles() {
+  if (!isTauriRuntime) {
+    return Promise.resolve<string[]>([]);
+  }
+
+  return invoke<string[]>("take_pending_open_files");
+}
+
+function listenForOpenFiles(handler: (paths: string[]) => void | Promise<void>) {
+  if (!isTauriRuntime) {
+    return Promise.resolve<UnlistenFn>(() => {});
+  }
+
+  return listen<OpenFilesPayload>(OPEN_FILES_EVENT, (event) => {
+    const paths = Array.isArray(event.payload?.paths)
+      ? event.payload.paths.filter((item): item is string => typeof item === "string")
+      : [];
+    if (paths.length === 0) {
+      return;
+    }
+
+    void handler(paths);
+  });
+}
+
 function searchWorkspace(
   root: string,
   query: string,
@@ -454,6 +485,8 @@ export {
   readFile,
   saveSession,
   searchWorkspace,
+  takePendingOpenFiles,
+  listenForOpenFiles,
   startupFiles,
   validateAndFormatJson,
   validateAndFormatJsonl,
