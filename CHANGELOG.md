@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.5
+
+- Added `Copy line` so the current cursor location can be copied as `absolute-path:line`.
+- Added a double-Shift quick jump palette that searches open tabs and the active workspace, with support for `file:line`, `file#line`, and line-only jumps.
+- Reworked tab view restoration to preserve cursor, vertical scroll, and horizontal scroll more reliably across file switches.
+- Removed the extra Monaco auto-view restore layer so manual tab restoration and explicit jumps no longer fight each other.
+
 ## 0.1.4
 
 - Fixed Finder `Open With` so opening a file while the app is already running now creates or focuses the correct tab instead of only activating the window.

@@ -49,6 +49,18 @@ type Toast = {
 };
 
 type MarkdownViewMode = "editor" | "split" | "preview";
+type QuickJumpCandidate = {
+  path: string;
+  name: string;
+  workspacePath: string | null;
+  source: "open" | "workspace" | "current";
+  line: number | null;
+  column?: number | null;
+  score: number;
+};
+type EditorSnapshot = NonNullable<
+  ReturnType<Parameters<OnMount>[0]["saveViewState"]>
+>;
 type CreatableFileExtension =
   | "txt"
   | "md"
@@ -82,6 +94,8 @@ const SEARCHABLE_EXTENSIONS = new Set([
   "log",
 ]);
 const DEFAULT_SEARCH_FEEDBACK = "Choose a workspace and click Run.";
+const QUICK_JUMP_SHIFT_WINDOW = 320;
+const QUICK_JUMP_RESULT_LIMIT = 12;
 
 const markdown = new MarkdownIt({
   html: false,
@@ -129,12 +143,108 @@ function shortenPath(filePath: string) {
   return parts.slice(-3).join("/");
 }
 
+function fileNameFromPath(filePath: string) {
+  const parts = normalizePath(filePath).split("/");
+  return parts[parts.length - 1] ?? filePath;
+}
+
 function mergeRecentFiles(previous: string[], nextPath: string) {
   return [nextPath, ...previous.filter((item) => item !== nextPath)].slice(0, 10);
 }
 
 function uniquePaths(paths: string[]) {
   return paths.filter((path, index) => paths.indexOf(path) === index);
+}
+
+function collectWorkspaceFilePaths(node: WorkspaceNode): string[] {
+  if (!node.isDir) {
+    return [node.path];
+  }
+
+  return node.children.flatMap((child) => collectWorkspaceFilePaths(child));
+}
+
+function parseQuickJumpInput(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return {
+      query: "",
+      line: null as number | null,
+      lineOnly: false,
+    };
+  }
+
+  if (/^\d+$/.test(trimmed)) {
+    return {
+      query: "",
+      line: Math.max(1, Number(trimmed)),
+      lineOnly: true,
+    };
+  }
+
+  const matched = trimmed.match(/^(.*?)(?:[:#](\d+))$/);
+  if (!matched) {
+    return {
+      query: trimmed,
+      line: null as number | null,
+      lineOnly: false,
+    };
+  }
+
+  return {
+    query: matched[1].trim(),
+    line: Math.max(1, Number(matched[2])),
+    lineOnly: false,
+  };
+}
+
+function scoreQuickJumpCandidate(path: string, name: string, query: string) {
+  if (!query) {
+    return 0;
+  }
+
+  const normalizedQuery = query.toLowerCase();
+  const normalizedName = name.toLowerCase();
+  const normalizedPath = normalizePath(path).toLowerCase();
+
+  if (normalizedName === normalizedQuery) {
+    return 0;
+  }
+
+  if (normalizedName.startsWith(normalizedQuery)) {
+    return 1;
+  }
+
+  if (normalizedName.includes(normalizedQuery)) {
+    return 2;
+  }
+
+  if (normalizedPath.endsWith(`/${normalizedQuery}`)) {
+    return 3;
+  }
+
+  if (normalizedPath.includes(normalizedQuery)) {
+    return 4;
+  }
+
+  return 10;
+}
+
+async function copyToClipboard(value: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  const input = document.createElement("textarea");
+  input.value = value;
+  input.setAttribute("readonly", "true");
+  input.style.position = "fixed";
+  input.style.opacity = "0";
+  document.body.appendChild(input);
+  input.select();
+  document.execCommand("copy");
+  document.body.removeChild(input);
 }
 
 function groupHits(hits: SearchHit[]) {
@@ -151,6 +261,20 @@ function groupHits(hits: SearchHit[]) {
 
 function normalizePath(value: string) {
   return value.replace(/\\/g, "/");
+}
+
+function getEditorModelPath(editor: Parameters<OnMount>[0]) {
+  const uri = editor.getModel()?.uri;
+  if (!uri) {
+    return null;
+  }
+
+  if (uri.scheme && uri.scheme !== "file" && uri.scheme !== "untitled") {
+    return null;
+  }
+
+  const rawPath = uri.path ? decodeURIComponent(uri.path) : "";
+  return rawPath ? normalizePath(rawPath) : null;
 }
 
 function fileDirectory(filePath: string) {
@@ -441,20 +565,27 @@ function App() {
   const [createFileExtension, setCreateFileExtension] = useState<CreatableFileExtension>("md");
   const [creatingFile, setCreatingFile] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(360);
+  const [quickJumpOpen, setQuickJumpOpen] = useState(false);
+  const [quickJumpQuery, setQuickJumpQuery] = useState("");
+  const [quickJumpIndex, setQuickJumpIndex] = useState(0);
 
   const appShellRef = useRef<HTMLElement | null>(null);
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
   const monacoRef = useRef<Monaco | null>(null);
   const previewBodyRef = useRef<HTMLDivElement | null>(null);
+  const quickJumpInputRef = useRef<HTMLInputElement | null>(null);
   const editorLayoutRef = useRef<HTMLDivElement | null>(null);
   const workspacesRef = useRef<WorkspaceEntry[]>([]);
   const tabsRef = useRef<FileTab[]>([]);
   const activeTabPathRef = useRef<string | null>(null);
   const viewStateRef = useRef<Record<string, EditorViewState>>({});
+  const editorViewSnapshotsRef = useRef<Record<string, EditorSnapshot>>({});
+  const restoringViewPathRef = useRef<string | null>(null);
   const pendingViewStateRef = useRef<EditorViewState | null>(null);
   const sessionReadyRef = useRef(false);
   const pendingExternalOpenFilesRef = useRef<string[]>([]);
   const toastIdRef = useRef(0);
+  const shiftPressedAtRef = useRef(0);
   const resizeStateRef = useRef<{ pointerId: number; type: "markdown" | "sidebar" } | null>(null);
 
   useEffect(() => {
@@ -515,6 +646,102 @@ function App() {
   const shellLayoutStyle = {
     "--sidebar-width": `${sidebarWidth}px`,
   } as CSSProperties;
+  const quickJumpTarget = useMemo(() => parseQuickJumpInput(quickJumpQuery), [quickJumpQuery]);
+  const quickJumpCandidates = useMemo<QuickJumpCandidate[]>(() => {
+    const candidates: QuickJumpCandidate[] = [];
+    const seenPaths = new Set<string>();
+    const query = quickJumpTarget.query.trim();
+    const line = quickJumpTarget.line;
+
+    if (quickJumpTarget.lineOnly && activeTab) {
+      return [
+        {
+          path: activeTab.path,
+          name: activeTab.name,
+          workspacePath: activeTab.workspacePath,
+          source: "current",
+          line,
+          score: 0,
+        },
+      ];
+    }
+
+    for (const tab of tabs) {
+      const score = scoreQuickJumpCandidate(tab.path, tab.name, query);
+      if (query && score > 4) {
+        continue;
+      }
+
+      const normalizedPath = normalizePath(tab.path);
+      if (seenPaths.has(normalizedPath)) {
+        continue;
+      }
+      seenPaths.add(normalizedPath);
+      candidates.push({
+        path: tab.path,
+        name: tab.name,
+        workspacePath: tab.workspacePath,
+        source: "open",
+        line,
+        score,
+      });
+    }
+
+    if (activeWorkspace) {
+      for (const filePath of collectWorkspaceFilePaths(activeWorkspace.tree)) {
+        const normalizedPath = normalizePath(filePath);
+        if (seenPaths.has(normalizedPath)) {
+          continue;
+        }
+
+        const name = fileNameFromPath(filePath);
+        const score = scoreQuickJumpCandidate(filePath, name, query);
+        if (query && score > 4) {
+          continue;
+        }
+
+        seenPaths.add(normalizedPath);
+        candidates.push({
+          path: filePath,
+          name,
+          workspacePath: activeWorkspace.path,
+          source: "workspace",
+          line,
+          score,
+        });
+      }
+    }
+
+    const sourceRank = {
+      current: 0,
+      open: 1,
+      workspace: 2,
+    } as const;
+
+    return candidates
+      .sort((left, right) => {
+        const sourceCompare = sourceRank[left.source] - sourceRank[right.source];
+        if (sourceCompare !== 0) {
+          return sourceCompare;
+        }
+
+        if (left.score !== right.score) {
+          return left.score - right.score;
+        }
+
+        const nameCompare = left.name.localeCompare(right.name, undefined, {
+          sensitivity: "base",
+        });
+        if (nameCompare !== 0) {
+          return nameCompare;
+        }
+
+        return left.path.localeCompare(right.path, undefined, {
+          sensitivity: "base",
+        });
+      })
+      .slice(0, QUICK_JUMP_RESULT_LIMIT);
+  }, [quickJumpTarget, tabs, activeWorkspace, activeTab]);
 
   function pushToast(message: string, tone: ToastTone = "info") {
     toastIdRef.current += 1;
@@ -525,16 +752,41 @@ function App() {
     }, 3200);
   }
 
+  function openQuickJump(initialQuery = "") {
+    setQuickJumpQuery(initialQuery);
+    setQuickJumpIndex(0);
+    setQuickJumpOpen(true);
+  }
+
+  function closeQuickJump() {
+    setQuickJumpOpen(false);
+    setQuickJumpQuery("");
+    setQuickJumpIndex(0);
+  }
+
   function recordActiveViewState() {
     const editor = editorRef.current;
-    const currentPath = activeTabPathRef.current;
-    if (!editor || !currentPath) {
+    if (!editor) {
+      return;
+    }
+
+    const currentPath = getEditorModelPath(editor) ?? activeTabPathRef.current;
+    if (!currentPath) {
+      return;
+    }
+
+    if (restoringViewPathRef.current === normalizePath(currentPath)) {
       return;
     }
 
     const position = editor.getPosition();
     if (!position) {
       return;
+    }
+
+    const snapshot = editor.saveViewState();
+    if (snapshot) {
+      editorViewSnapshotsRef.current[currentPath] = snapshot;
     }
 
     viewStateRef.current[currentPath] = {
@@ -544,6 +796,118 @@ function App() {
       scrollTop: Math.round(editor.getScrollTop()),
       scrollLeft: Math.round(editor.getScrollLeft()),
     };
+  }
+
+  function restoreEditorView(targetPath: string) {
+    const editor = editorRef.current;
+    const normalizedTargetPath = normalizePath(targetPath);
+    const currentModelPath = editor ? getEditorModelPath(editor) : null;
+    if (!editor) {
+      return;
+    }
+
+    if (currentModelPath && normalizePath(currentModelPath) !== normalizedTargetPath) {
+      return;
+    }
+
+    const explicitTarget =
+      pendingViewStateRef.current?.filePath === targetPath ? pendingViewStateRef.current : null;
+    const savedSnapshot = explicitTarget ? null : editorViewSnapshotsRef.current[targetPath];
+    const fallbackViewState = explicitTarget ? null : viewStateRef.current[targetPath];
+
+    if (!explicitTarget && !savedSnapshot && !fallbackViewState) {
+      return;
+    }
+
+    restoringViewPathRef.current = normalizedTargetPath;
+    let settleFrame = 0;
+
+    const frame = window.requestAnimationFrame(() => {
+      if (explicitTarget) {
+        const line = explicitTarget.line || 1;
+        const column = explicitTarget.column || 1;
+        editor.setPosition({ lineNumber: line, column });
+        editor.setScrollTop(explicitTarget.scrollTop || 0);
+        editor.setScrollLeft(explicitTarget.scrollLeft || 0);
+        editor.revealLineInCenter(line);
+        pendingViewStateRef.current = null;
+      } else if (savedSnapshot) {
+        editor.restoreViewState(savedSnapshot);
+      } else if (fallbackViewState) {
+        editor.setPosition({
+          lineNumber: fallbackViewState.line || 1,
+          column: fallbackViewState.column || 1,
+        });
+        editor.setScrollTop(fallbackViewState.scrollTop || 0);
+        editor.setScrollLeft(fallbackViewState.scrollLeft || 0);
+      }
+
+      editor.focus();
+      syncPreviewScrollFromEditor();
+
+      settleFrame = window.requestAnimationFrame(() => {
+        if (restoringViewPathRef.current === normalizedTargetPath) {
+          restoringViewPathRef.current = null;
+        }
+        recordActiveViewState();
+      });
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.cancelAnimationFrame(settleFrame);
+      if (restoringViewPathRef.current === normalizedTargetPath) {
+        restoringViewPathRef.current = null;
+      }
+    };
+  }
+
+  async function jumpToFileLocation(candidate: QuickJumpCandidate | null) {
+    if (!candidate) {
+      return;
+    }
+
+    recordActiveViewState();
+    const targetAlreadyActive = activeTabPathRef.current === candidate.path;
+    closeQuickJump();
+
+    const nextViewState = candidate.line
+      ? {
+          filePath: candidate.path,
+          line: candidate.line,
+          column: candidate.column ?? 1,
+          scrollTop: 0,
+          scrollLeft: 0,
+        }
+      : null;
+
+    await openFilePath(
+      candidate.path,
+      nextViewState,
+      candidate.workspacePath,
+      candidate.source !== "current",
+    );
+
+    if (nextViewState && targetAlreadyActive) {
+      restoreEditorView(candidate.path);
+    }
+  }
+
+  async function handleCopyLineReference() {
+    if (!activeTab) {
+      return;
+    }
+
+    const line =
+      editorRef.current?.getPosition()?.lineNumber ?? viewStateRef.current[activeTab.path]?.line ?? 1;
+    const reference = `${activeTab.path}:${line}`;
+
+    try {
+      await copyToClipboard(reference);
+      pushToast(`Copied ${shortenPath(activeTab.path)}:${line}`, "success");
+    } catch (error) {
+      pushToast(String(error), "error");
+    }
   }
 
   function updateSettings(nextSettings: Partial<AppSettings>) {
@@ -870,6 +1234,7 @@ function App() {
 
     recordActiveViewState();
     delete viewStateRef.current[filePath];
+    delete editorViewSnapshotsRef.current[filePath];
 
     const nextTabs = currentTabs.filter((tab) => tab.path !== filePath);
     setTabs(nextTabs);
@@ -1010,6 +1375,13 @@ function App() {
     editor.onDidScrollChange(() => {
       recordActiveViewState();
       syncPreviewScrollFromEditor();
+    });
+    editor.onDidChangeModel(() => {
+      const currentPath = getEditorModelPath(editor);
+      if (!currentPath) {
+        return;
+      }
+      restoreEditorView(currentPath);
     });
   };
 
@@ -1238,6 +1610,31 @@ function App() {
   }, [activeTab?.path, activeTab?.workspacePath, workspacePath]);
 
   useEffect(() => {
+    if (!quickJumpOpen) {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      quickJumpInputRef.current?.focus();
+      quickJumpInputRef.current?.select();
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+    };
+  }, [quickJumpOpen]);
+
+  useEffect(() => {
+    setQuickJumpIndex((previous) => {
+      if (quickJumpCandidates.length === 0) {
+        return 0;
+      }
+
+      return Math.min(previous, quickJumpCandidates.length - 1);
+    });
+  }, [quickJumpCandidates.length]);
+
+  useEffect(() => {
     const workspacePaths = workspaces.map((item) => item.path);
     if (workspacePaths.length === 0) {
       return;
@@ -1315,36 +1712,12 @@ function App() {
   }, [activeTab?.path, activeTab?.content, activeTab?.extension]);
 
   useEffect(() => {
-    const editor = editorRef.current;
-    if (!editor || !activeTabPath) {
+    if (!activeTabPath) {
       return;
     }
 
-    const pending =
-      pendingViewStateRef.current?.filePath === activeTabPath
-        ? pendingViewStateRef.current
-        : viewStateRef.current[activeTabPath];
-
-    if (!pending) {
-      return;
-    }
-
-    const frame = window.requestAnimationFrame(() => {
-      editor.setPosition({ lineNumber: pending.line || 1, column: pending.column || 1 });
-      editor.setScrollTop(pending.scrollTop || 0);
-      editor.setScrollLeft(pending.scrollLeft || 0);
-      editor.revealPositionInCenterIfOutsideViewport({
-        lineNumber: pending.line || 1,
-        column: pending.column || 1,
-      });
-      pendingViewStateRef.current = null;
-      syncPreviewScrollFromEditor();
-    });
-
-    return () => {
-      window.cancelAnimationFrame(frame);
-    };
-  }, [activeTabPath, activeTab?.content]);
+    return restoreEditorView(activeTabPath);
+  }, [activeTabPath, activeTab?.path]);
 
   useEffect(() => {
     if (!markdownActive || markdownViewMode !== "split") {
@@ -1445,8 +1818,24 @@ function App() {
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
+        if (quickJumpOpen) {
+          event.preventDefault();
+          closeQuickJump();
+          return;
+        }
         setSettingsOpen(false);
         return;
+      }
+
+      if (!event.repeat && event.key === "Shift") {
+        const now = performance.now();
+        if (now - shiftPressedAtRef.current <= QUICK_JUMP_SHIFT_WINDOW) {
+          event.preventDefault();
+          openQuickJump();
+          shiftPressedAtRef.current = 0;
+          return;
+        }
+        shiftPressedAtRef.current = now;
       }
 
       const modifier = event.metaKey || event.ctrlKey;
@@ -1464,6 +1853,10 @@ function App() {
       if (key === ",") {
         event.preventDefault();
         setSettingsOpen(true);
+        return;
+      }
+
+      if (key === "shift") {
         return;
       }
 
@@ -1493,7 +1886,7 @@ function App() {
     return () => {
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [zoomEnabled, settings.textZoom, activeTab]);
+  }, [quickJumpOpen, zoomEnabled, settings.textZoom, activeTab]);
 
   const splitLayoutStyle =
     showEditorPanel && showPreviewPanel
@@ -1739,23 +2132,20 @@ function App() {
                     <button
                       className="search-hit"
                       key={`${hit.filePath}:${hit.lineNumber}:${hit.columnStart}`}
-                      onClick={() => {
-                        pendingViewStateRef.current = {
-                          filePath: hit.filePath,
-                          line: hit.lineNumber,
-                          column: hit.columnStart,
-                          scrollTop: 0,
-                          scrollLeft: 0,
-                        };
-                        void openFilePath(
-                          hit.filePath,
-                          pendingViewStateRef.current,
-                          findWorkspacePathForFile(
+                      onClick={() =>
+                        void jumpToFileLocation({
+                          path: hit.filePath,
+                          name: fileNameFromPath(hit.filePath),
+                          workspacePath: findWorkspacePathForFile(
                             hit.filePath,
                             workspaces.map((item) => item.path),
                           ),
-                        );
-                      }}
+                          source: "workspace",
+                          line: hit.lineNumber,
+                          column: hit.columnStart,
+                          score: 0,
+                        })
+                      }
                     >
                       <strong>L{hit.lineNumber}</strong>
                       <span>{hit.lineText.trim() || "(blank line)"}</span>
@@ -1870,6 +2260,12 @@ function App() {
             >
               Copy
             </button>
+            <button className="icon-button" onClick={() => void handleCopyLineReference()} disabled={!activeTab}>
+              Copy line
+            </button>
+            <button className="icon-button" onClick={() => openQuickJump()}>
+              Jump
+            </button>
             {zoomEnabled ? (
               <div className="zoom-group" aria-label="Text zoom controls">
                 <button className="icon-button" onClick={() => adjustTextZoom(-0.1)}>
@@ -1967,7 +2363,6 @@ function App() {
                     value={activeTab.content}
                     language={inferLanguage(activeTab.extension)}
                     height="100%"
-                    saveViewState
                     loading={<div className="empty-panel">Loading editor...</div>}
                     onChange={handleEditorChange}
                     options={{
@@ -2026,6 +2421,86 @@ function App() {
           </div>
         )}
       </section>
+
+      {quickJumpOpen ? (
+        <div className="quick-jump-overlay" onClick={() => closeQuickJump()}>
+          <section
+            className="quick-jump-dialog"
+            aria-label="Quick jump"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="quick-jump-header">
+              <div>
+                <p className="eyebrow">Quick jump</p>
+                <h2>Find a file, then jump to a line</h2>
+              </div>
+              <button className="icon-button" onClick={() => closeQuickJump()}>
+                Close
+              </button>
+            </div>
+
+            <input
+              ref={quickJumpInputRef}
+              className="quick-jump-input"
+              placeholder="file name, path, or file:42"
+              value={quickJumpQuery}
+              onChange={(event) => {
+                setQuickJumpQuery(event.target.value);
+                setQuickJumpIndex(0);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "ArrowDown") {
+                  event.preventDefault();
+                  setQuickJumpIndex((previous) =>
+                    quickJumpCandidates.length === 0
+                      ? 0
+                      : Math.min(previous + 1, quickJumpCandidates.length - 1),
+                  );
+                  return;
+                }
+
+                if (event.key === "ArrowUp") {
+                  event.preventDefault();
+                  setQuickJumpIndex((previous) => Math.max(previous - 1, 0));
+                  return;
+                }
+
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  void jumpToFileLocation(
+                    quickJumpCandidates[quickJumpIndex] ?? quickJumpCandidates[0] ?? null,
+                  );
+                }
+              }}
+            />
+
+            <div className="quick-jump-hint">
+              Double-tap Shift to open. Use <code>file:42</code> or just <code>42</code> to jump.
+            </div>
+
+            <div className="quick-jump-results">
+              {quickJumpCandidates.length === 0 ? (
+                <div className="quick-jump-empty">No files matched this query.</div>
+              ) : (
+                quickJumpCandidates.map((candidate, index) => (
+                  <button
+                    key={candidate.path}
+                    className={`quick-jump-item ${index === quickJumpIndex ? "active" : ""}`}
+                    onMouseEnter={() => setQuickJumpIndex(index)}
+                    onClick={() => void jumpToFileLocation(candidate)}
+                  >
+                    <div className="quick-jump-item-top">
+                      <strong>{candidate.name}</strong>
+                      <span>{candidate.line ? `Line ${candidate.line}` : candidate.source === "open" ? "Open tab" : "Workspace"}</span>
+                    </div>
+                    <div className="quick-jump-path">{candidate.path}</div>
+                  </button>
+                ))
+              )}
+            </div>
+          </section>
+        </div>
+      ) : null}
 
       {settingsOpen ? (
         <div className="settings-overlay" onClick={() => setSettingsOpen(false)}>
