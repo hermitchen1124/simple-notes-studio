@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.6
+
+- Fixed Linux release builds by guarding the macOS-only `RunEvent::Opened` handler behind conditional compilation.
+- Re-ran the cross-platform release pipeline so the quick jump and tab view restoration updates can publish for macOS, Windows, and Linux together.
+
 ## 0.1.5
 
 - Added `Copy line` so the current cursor location can be copied as `absolute-path:line`.

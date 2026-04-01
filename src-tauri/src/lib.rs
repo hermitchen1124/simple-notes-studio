@@ -628,6 +628,7 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| match event {
+            #[cfg(target_os = "macos")]
             RunEvent::Opened { urls } => {
                 emit_or_queue_open_files(app, supported_file_paths_from_urls(urls));
             }
