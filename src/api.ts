@@ -389,6 +389,26 @@ function writeFile(path: string, content: string) {
   return invoke<SaveResult>("write_file", { path, content });
 }
 
+function movePathToTrash(path: string, isDir: boolean) {
+  if (!isTauriRuntime) {
+    const files = loadMockFiles();
+    if (isDir) {
+      const prefix = `${path.replace(/\/+$/, "")}/`;
+      for (const filePath of Object.keys(files)) {
+        if (filePath === path || filePath.startsWith(prefix)) {
+          delete files[filePath];
+        }
+      }
+    } else {
+      delete files[path];
+    }
+    saveMockFiles(files);
+    return Promise.resolve();
+  }
+
+  return invoke<void>("move_to_trash", { path });
+}
+
 function startupFiles() {
   if (!isTauriRuntime) {
     return Promise.resolve<string[]>([]);
@@ -485,6 +505,7 @@ export {
   readFile,
   saveSession,
   searchWorkspace,
+  movePathToTrash,
   takePendingOpenFiles,
   listenForOpenFiles,
   startupFiles,

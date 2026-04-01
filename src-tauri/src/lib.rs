@@ -176,6 +176,17 @@ fn write_file(path: String, content: String) -> Result<SaveResult, String> {
 }
 
 #[tauri::command]
+fn move_to_trash(path: String) -> Result<(), String> {
+    let target_path = normalize_existing_path(Path::new(&path));
+    if !target_path.exists() {
+        return Err(format!("Path not found: {path}"));
+    }
+
+    trash::delete(&target_path)
+        .map_err(|error| format!("Failed to move {} to trash: {error}", target_path.display()))
+}
+
+#[tauri::command]
 fn search_workspace(
     root: String,
     query: String,
@@ -617,6 +628,7 @@ pub fn run() {
             open_workspace,
             read_file,
             write_file,
+            move_to_trash,
             search_workspace,
             validate_and_format_json,
             validate_and_format_jsonl,

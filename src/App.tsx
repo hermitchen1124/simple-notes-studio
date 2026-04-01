@@ -10,12 +10,14 @@ import {
   useState,
   type CSSProperties,
   type FormEvent,
+  type MouseEvent as ReactMouseEvent,
 } from "react";
 import {
   DEFAULT_SETTINGS,
   isTauriRuntime,
   listenForOpenFiles,
   loadSession,
+  movePathToTrash,
   normalizeSettings,
   openWorkspace,
   readFile,
@@ -58,6 +60,14 @@ type QuickJumpCandidate = {
   column?: number | null;
   score: number;
 };
+type TreeContextMenuState = {
+  path: string;
+  name: string;
+  workspacePath: string;
+  isDir: boolean;
+  x: number;
+  y: number;
+};
 type EditorSnapshot = NonNullable<
   ReturnType<Parameters<OnMount>[0]["saveViewState"]>
 >;
@@ -96,6 +106,10 @@ const SEARCHABLE_EXTENSIONS = new Set([
 const DEFAULT_SEARCH_FEEDBACK = "Choose a workspace and click Run.";
 const QUICK_JUMP_SHIFT_WINDOW = 320;
 const QUICK_JUMP_RESULT_LIMIT = 12;
+const MARKDOWN_SPLITTER_SIZE = 12;
+const MIN_MARKDOWN_EDITOR_WIDTH = 420;
+const MIN_MARKDOWN_PREVIEW_WIDTH = 320;
+const MIN_MARKDOWN_SPLIT_PANE_WIDTH = 240;
 
 const markdown = new MarkdownIt({
   html: false,
@@ -261,6 +275,35 @@ function groupHits(hits: SearchHit[]) {
 
 function normalizePath(value: string) {
   return value.replace(/\\/g, "/");
+}
+
+function isPathAtOrInside(candidatePath: string, targetPath: string) {
+  const normalizedCandidatePath = normalizePath(candidatePath);
+  const normalizedTargetPath = normalizePath(targetPath).replace(/\/+$/, "");
+  return (
+    normalizedCandidatePath === normalizedTargetPath ||
+    normalizedCandidatePath.startsWith(`${normalizedTargetPath}/`)
+  );
+}
+
+function clampMarkdownRatio(containerWidth: number, nextRatio: number) {
+  const usableWidth = Math.max(containerWidth - MARKDOWN_SPLITTER_SIZE, 1);
+  const minLeft = Math.min(
+    MIN_MARKDOWN_EDITOR_WIDTH,
+    Math.max(MIN_MARKDOWN_SPLIT_PANE_WIDTH, usableWidth * 0.38),
+  );
+  const minRight = Math.min(
+    MIN_MARKDOWN_PREVIEW_WIDTH,
+    Math.max(MIN_MARKDOWN_SPLIT_PANE_WIDTH, usableWidth * 0.34),
+  );
+
+  if (usableWidth <= minLeft + minRight) {
+    return Math.min(0.68, Math.max(0.32, nextRatio));
+  }
+
+  const minRatio = minLeft / usableWidth;
+  const maxRatio = 1 - minRight / usableWidth;
+  return Math.min(maxRatio, Math.max(minRatio, nextRatio));
 }
 
 function getEditorModelPath(editor: Parameters<OnMount>[0]) {
@@ -491,17 +534,25 @@ function defineEditorTheme(monaco: Monaco) {
 function TreeNode({
   node,
   level,
+  workspacePath,
   activePath,
   collapsedPaths,
   onToggle,
   onOpen,
+  onContextMenu,
 }: {
   node: WorkspaceNode;
   level: number;
+  workspacePath: string;
   activePath: string | null;
   collapsedPaths: Set<string>;
   onToggle: (path: string) => void;
   onOpen: (path: string) => void;
+  onContextMenu: (
+    event: ReactMouseEvent<HTMLButtonElement>,
+    node: WorkspaceNode,
+    workspacePath: string,
+  ) => void;
 }) {
   const collapsed = collapsedPaths.has(node.path);
   const style = { paddingLeft: `${level * 14 + 10}px` };
@@ -509,7 +560,12 @@ function TreeNode({
   if (node.isDir) {
     return (
       <div className="tree-node">
-        <button className="tree-row tree-folder" style={style} onClick={() => onToggle(node.path)}>
+        <button
+          className="tree-row tree-folder"
+          style={style}
+          onClick={() => onToggle(node.path)}
+          onContextMenu={(event) => onContextMenu(event, node, workspacePath)}
+        >
           <span className="tree-caret">{collapsed ? ">" : "v"}</span>
           <span>{node.name}</span>
         </button>
@@ -519,10 +575,12 @@ function TreeNode({
               key={child.path}
               node={child}
               level={level + 1}
+              workspacePath={workspacePath}
               activePath={activePath}
               collapsedPaths={collapsedPaths}
               onToggle={onToggle}
               onOpen={onOpen}
+              onContextMenu={onContextMenu}
             />
           ))}
       </div>
@@ -534,6 +592,7 @@ function TreeNode({
       className={`tree-row tree-file ${activePath === node.path ? "active" : ""}`}
       style={style}
       onClick={() => onOpen(node.path)}
+      onContextMenu={(event) => onContextMenu(event, node, workspacePath)}
     >
       <span className="tree-caret"> </span>
       <span>{node.name}</span>
@@ -568,6 +627,7 @@ function App() {
   const [quickJumpOpen, setQuickJumpOpen] = useState(false);
   const [quickJumpQuery, setQuickJumpQuery] = useState("");
   const [quickJumpIndex, setQuickJumpIndex] = useState(0);
+  const [treeContextMenu, setTreeContextMenu] = useState<TreeContextMenuState | null>(null);
 
   const appShellRef = useRef<HTMLElement | null>(null);
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
@@ -762,6 +822,51 @@ function App() {
     setQuickJumpOpen(false);
     setQuickJumpQuery("");
     setQuickJumpIndex(0);
+  }
+
+  function openTreeContextMenu(
+    event: ReactMouseEvent<HTMLButtonElement>,
+    node: WorkspaceNode,
+    nodeWorkspacePath: string,
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const menuWidth = 228;
+    const menuHeight = 92;
+    setTreeContextMenu({
+      path: node.path,
+      name: node.name,
+      workspacePath: nodeWorkspacePath,
+      isDir: node.isDir,
+      x: Math.max(12, Math.min(event.clientX, window.innerWidth - menuWidth)),
+      y: Math.max(12, Math.min(event.clientY, window.innerHeight - menuHeight)),
+    });
+  }
+
+  function clearPathCaches(targetPath: string) {
+    for (const key of Object.keys(viewStateRef.current)) {
+      if (isPathAtOrInside(key, targetPath)) {
+        delete viewStateRef.current[key];
+      }
+    }
+
+    for (const key of Object.keys(editorViewSnapshotsRef.current)) {
+      if (isPathAtOrInside(key, targetPath)) {
+        delete editorViewSnapshotsRef.current[key];
+      }
+    }
+
+    if (
+      pendingViewStateRef.current &&
+      isPathAtOrInside(pendingViewStateRef.current.filePath, targetPath)
+    ) {
+      pendingViewStateRef.current = null;
+    }
+
+    if (restoringViewPathRef.current && isPathAtOrInside(restoringViewPathRef.current, targetPath)) {
+      restoringViewPathRef.current = null;
+    }
   }
 
   function recordActiveViewState() {
@@ -1288,6 +1393,75 @@ function App() {
     }
   }
 
+  async function handleTrashWorkspaceNode(target: TreeContextMenuState) {
+    setTreeContextMenu(null);
+
+    const affectedTabs = tabsRef.current.filter((tab) => isPathAtOrInside(tab.path, target.path));
+    const hasDirtyTabs = affectedTabs.some((tab) => tab.dirty);
+    const title = target.isDir ? "Move folder to trash" : "Move file to trash";
+    const detail = hasDirtyTabs
+      ? " Unsaved changes in open tabs under this path will be lost."
+      : "";
+    const message = target.isDir
+      ? `Move ${target.name} and its contents to the trash?${detail}`
+      : `Move ${target.name} to the trash?${detail}`;
+    const shouldContinue = isTauriRuntime
+      ? await confirm(message, {
+          title,
+          kind: "warning",
+        })
+      : window.confirm(message);
+
+    if (!shouldContinue) {
+      return;
+    }
+
+    try {
+      recordActiveViewState();
+      await movePathToTrash(target.path, target.isDir);
+
+      const currentTabs = tabsRef.current;
+      const activeIndex = currentTabs.findIndex((tab) => tab.path === activeTabPathRef.current);
+      const nextTabs = currentTabs.filter((tab) => !isPathAtOrInside(tab.path, target.path));
+      const activeTabRemoved =
+        activeTabPathRef.current !== null &&
+        isPathAtOrInside(activeTabPathRef.current, target.path);
+
+      clearPathCaches(target.path);
+      setTabs(nextTabs);
+      if (activeTabRemoved) {
+        const fallback =
+          nextTabs[Math.min(activeIndex, nextTabs.length - 1)] ??
+          nextTabs[Math.max(activeIndex - 1, 0)] ??
+          nextTabs[0] ??
+          null;
+        setActiveTabPath(fallback?.path ?? null);
+        if (fallback?.workspacePath) {
+          setWorkspacePath(fallback.workspacePath);
+        }
+      }
+
+      setRecentFiles((previous) => previous.filter((item) => !isPathAtOrInside(item, target.path)));
+      setSearchResults((previous) =>
+        previous.filter((hit) => !isPathAtOrInside(hit.filePath, target.path)),
+      );
+      setCollapsedPaths((previous) => {
+        const next = new Set(previous);
+        for (const value of previous) {
+          if (isPathAtOrInside(value, target.path)) {
+            next.delete(value);
+          }
+        }
+        return next;
+      });
+      await refreshWorkspacePath(target.workspacePath);
+      setSearchFeedback(`Moved ${target.name} to trash.`);
+      pushToast(`Moved ${target.name} to trash`, "success");
+    } catch (error) {
+      pushToast(String(error), "error");
+    }
+  }
+
   async function handleSearch() {
     if (!activeWorkspace?.path || !searchText.trim()) {
       setSearchResults([]);
@@ -1745,8 +1919,9 @@ function App() {
         return;
       }
 
-      const nextRatio = (clientX - bounds.left) / bounds.width;
-      setMarkdownSplitRatio(Math.min(0.75, Math.max(0.25, nextRatio)));
+      const usableWidth = Math.max(bounds.width - MARKDOWN_SPLITTER_SIZE, 1);
+      const nextRatio = (clientX - bounds.left) / usableWidth;
+      setMarkdownSplitRatio(clampMarkdownRatio(bounds.width, nextRatio));
     }
 
     function updateSidebarWidth(clientX: number) {
@@ -1796,6 +1971,29 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!showEditorPanel || !showPreviewPanel) {
+      return;
+    }
+
+    const layout = editorLayoutRef.current;
+    if (!layout) {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      const width = layout.getBoundingClientRect().width;
+      if (width <= 0) {
+        return;
+      }
+      setMarkdownSplitRatio((previous) => clampMarkdownRatio(width, previous));
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+    };
+  }, [showEditorPanel, showPreviewPanel, sidebarWidth, activeTab?.path, markdownViewMode]);
+
+  useEffect(() => {
     function syncSidebarWidth() {
       const shell = appShellRef.current;
       if (!shell) {
@@ -1821,6 +2019,11 @@ function App() {
         if (quickJumpOpen) {
           event.preventDefault();
           closeQuickJump();
+          return;
+        }
+        if (treeContextMenu) {
+          event.preventDefault();
+          setTreeContextMenu(null);
           return;
         }
         setSettingsOpen(false);
@@ -1886,13 +2089,12 @@ function App() {
     return () => {
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [quickJumpOpen, zoomEnabled, settings.textZoom, activeTab]);
+  }, [quickJumpOpen, treeContextMenu, zoomEnabled, settings.textZoom, activeTab]);
 
   const splitLayoutStyle =
     showEditorPanel && showPreviewPanel
       ? ({
-          "--split-left": `${markdownSplitRatio}fr`,
-          "--split-right": `${1 - markdownSplitRatio}fr`,
+          gridTemplateColumns: `minmax(0, calc((100% - ${MARKDOWN_SPLITTER_SIZE}px) * ${markdownSplitRatio})) ${MARKDOWN_SPLITTER_SIZE}px minmax(0, 1fr)`,
         } as CSSProperties)
       : undefined;
 
@@ -2036,6 +2238,7 @@ function App() {
                             key={child.path}
                             node={child}
                             level={1}
+                            workspacePath={entry.path}
                             activePath={activeTabPath}
                             collapsedPaths={collapsedPaths}
                             onToggle={(path) =>
@@ -2050,6 +2253,7 @@ function App() {
                               })
                             }
                             onOpen={(path) => void openFilePath(path, null, entry.path)}
+                            onContextMenu={openTreeContextMenu}
                           />
                         ))
                       : null}
@@ -2376,6 +2580,7 @@ function App() {
                       padding: { top: 18, bottom: 18 },
                       fontFamily:
                         "'SF Mono', 'JetBrains Mono', 'Menlo', 'Consolas', monospace",
+                      fixedOverflowWidgets: true,
                       scrollBeyondLastLine: false,
                     }}
                   />
@@ -2499,6 +2704,35 @@ function App() {
               )}
             </div>
           </section>
+        </div>
+      ) : null}
+
+      {treeContextMenu ? (
+        <div
+          className="tree-context-menu-layer"
+          onClick={() => setTreeContextMenu(null)}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            setTreeContextMenu(null);
+          }}
+        >
+          <div
+            className="tree-context-menu"
+            style={{ left: treeContextMenu.x, top: treeContextMenu.y }}
+            onClick={(event) => event.stopPropagation()}
+            onContextMenu={(event) => event.preventDefault()}
+          >
+            <div className="tree-context-menu-label">
+              <strong>{treeContextMenu.name}</strong>
+              <span>{treeContextMenu.isDir ? "Folder" : "File"}</span>
+            </div>
+            <button
+              className="tree-context-action danger"
+              onClick={() => void handleTrashWorkspaceNode(treeContextMenu)}
+            >
+              Move to trash
+            </button>
+          </div>
         </div>
       ) : null}
 

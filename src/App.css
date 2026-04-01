@@ -551,7 +551,15 @@ button {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
   padding: 8px 10px;
+}
+
+.tree-row span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tree-file.active {
@@ -690,10 +698,7 @@ button {
 }
 
 .editor-layout.split {
-  grid-template-columns:
-    minmax(0, var(--split-left, 0.58fr))
-    12px
-    minmax(320px, var(--split-right, 0.42fr));
+  grid-template-columns: minmax(0, calc(58% - 6px)) 12px minmax(0, 1fr);
   gap: 0;
 }
 
@@ -701,7 +706,10 @@ button {
 .preview-panel {
   display: flex;
   flex-direction: column;
+  min-width: 0;
   min-height: 0;
+  width: 100%;
+  max-width: 100%;
   background: var(--surface-bg-strong);
   border: 1px solid var(--border-soft);
   border-radius: 20px;
@@ -786,12 +794,17 @@ button {
   min-height: 0;
   padding: 0 18px 24px;
   overflow: auto;
+  overflow-wrap: anywhere;
   line-height: 1.7;
   color: var(--app-text);
   overscroll-behavior: contain;
   scrollbar-gutter: stable both-edges;
   -webkit-overflow-scrolling: touch;
   scroll-behavior: smooth;
+}
+
+.preview-body > * {
+  max-width: 100%;
 }
 
 .preview-body h1,
@@ -805,13 +818,73 @@ button {
   background: var(--inline-code-bg);
   padding: 0.1em 0.35em;
   border-radius: 8px;
+  word-break: break-word;
 }
 
 .preview-body pre {
   background: var(--code-bg);
+  max-width: 100%;
+  box-sizing: border-box;
   padding: 14px;
   border-radius: 16px;
   overflow: auto;
+}
+
+.preview-body img,
+.preview-body table {
+  max-width: 100%;
+}
+
+.editor-surface .monaco-editor .find-widget {
+  top: 12px !important;
+  right: 12px !important;
+  left: auto !important;
+  width: min(720px, calc(100% - 24px)) !important;
+  max-width: calc(100% - 24px) !important;
+  box-sizing: border-box;
+  border-radius: 16px !important;
+  border: 1px solid var(--border-soft) !important;
+  background: var(--surface-bg-strong) !important;
+  box-shadow: 0 18px 34px rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+  z-index: 8 !important;
+}
+
+.editor-surface .monaco-editor .find-widget .find-part,
+.editor-surface .monaco-editor .find-widget .replace-part {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.editor-surface .monaco-editor .find-widget .monaco-inputbox,
+.editor-surface .monaco-editor .find-widget .monaco-inputbox .ibwrapper,
+.editor-surface .monaco-editor .find-widget .monaco-inputbox input {
+  min-width: 0;
+  width: 100%;
+}
+
+.editor-surface .monaco-editor .find-widget .matchesCount {
+  flex: 0 0 auto;
+  min-width: 72px;
+  padding-inline: 6px;
+  text-align: center;
+}
+
+.editor-surface .monaco-editor .find-widget .monaco-action-bar {
+  flex-wrap: nowrap;
+}
+
+.editor-surface .monaco-editor .find-widget .button {
+  flex: 0 0 auto;
+}
+
+.workbench-hover-container,
+.workbench-hover,
+.workbench-hover-pointer {
+  pointer-events: none;
+  display: none !important;
 }
 
 .workspace-empty {
@@ -877,6 +950,66 @@ button {
   place-items: center;
   padding: 24px;
   z-index: 20;
+}
+
+.tree-context-menu-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 16;
+}
+
+.tree-context-menu {
+  position: fixed;
+  min-width: 220px;
+  padding: 10px;
+  border-radius: 18px;
+  border: 1px solid var(--border-soft);
+  background: var(--surface-bg-strong);
+  box-shadow: 0 18px 36px rgba(8, 12, 18, 0.24);
+  backdrop-filter: blur(14px);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tree-context-menu-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 6px 0;
+}
+
+.tree-context-menu-label strong {
+  color: var(--panel-text);
+}
+
+.tree-context-menu-label span {
+  font-size: 0.82rem;
+  color: var(--secondary-text);
+}
+
+.tree-context-action {
+  width: 100%;
+  text-align: left;
+  border-radius: 14px;
+  padding: 11px 12px;
+  border: 1px solid var(--border-button);
+  background: var(--surface-soft);
+  color: var(--button-text);
+  transition:
+    transform 0.16s ease,
+    border-color 0.16s ease,
+    background-color 0.16s ease;
+}
+
+.tree-context-action:hover {
+  transform: translateY(-1px);
+  border-color: var(--active-border);
+}
+
+.tree-context-action.danger {
+  color: var(--error-text);
+  background: var(--error-bg);
 }
 
 .quick-jump-dialog,
@@ -1110,7 +1243,12 @@ button {
   }
 
   .editor-layout.split {
-    grid-template-columns: 1fr;
+    grid-template-columns: 1fr !important;
+    gap: 14px;
+  }
+
+  .editor-splitter {
+    display: none;
   }
 
   .toolbar {

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.7
+
+- Added a workspace-tree context menu so files and folders can be moved to the system trash instead of being deleted permanently.
+- Fixed Markdown split resizing so the preview pane keeps sane minimum widths and no longer opens large blank areas when dragged to extremes.
+- Hardened Markdown preview overflow handling for long inline code, tables, and other wide content.
+- Reworked the Monaco find widget sizing and disabled its blocking hover tooltips so the right-side action buttons stay clickable.
+
 ## 0.1.6
 
 - Fixed Linux release builds by guarding the macOS-only `RunEvent::Opened` handler behind conditional compilation.
