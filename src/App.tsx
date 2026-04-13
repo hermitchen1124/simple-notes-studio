@@ -17,10 +17,12 @@ import {
   isTauriRuntime,
   listenForOpenFiles,
   loadSession,
+  inspectFiles,
   movePathToTrash,
   normalizeSettings,
   openWorkspace,
   readFile,
+  revealInFileManager,
   saveSession,
   searchWorkspace,
   takePendingOpenFiles,
@@ -65,6 +67,12 @@ type TreeContextMenuState = {
   name: string;
   workspacePath: string;
   isDir: boolean;
+  x: number;
+  y: number;
+};
+type TabContextMenuState = {
+  path: string;
+  name: string;
   x: number;
   y: number;
 };
@@ -331,6 +339,10 @@ function fileDirectory(filePath: string) {
 
 function joinPath(parent: string, name: string) {
   return `${normalizePath(parent).replace(/\/+$/, "")}/${name}`;
+}
+
+function lineTextAtNumber(content: string, lineNumber: number) {
+  return content.split("\n")[Math.max(lineNumber - 1, 0)] ?? "";
 }
 
 function isInsideWorkspace(filePath: string, workspacePath: string) {
@@ -628,6 +640,7 @@ function App() {
   const [quickJumpQuery, setQuickJumpQuery] = useState("");
   const [quickJumpIndex, setQuickJumpIndex] = useState(0);
   const [treeContextMenu, setTreeContextMenu] = useState<TreeContextMenuState | null>(null);
+  const [tabContextMenu, setTabContextMenu] = useState<TabContextMenuState | null>(null);
 
   const appShellRef = useRef<HTMLElement | null>(null);
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
@@ -647,6 +660,7 @@ function App() {
   const toastIdRef = useRef(0);
   const shiftPressedAtRef = useRef(0);
   const resizeStateRef = useRef<{ pointerId: number; type: "markdown" | "sidebar" } | null>(null);
+  const externalScanInFlightRef = useRef(false);
 
   useEffect(() => {
     workspacesRef.current = workspaces;
@@ -831,6 +845,7 @@ function App() {
   ) {
     event.preventDefault();
     event.stopPropagation();
+    setTabContextMenu(null);
 
     const menuWidth = 228;
     const menuHeight = 92;
@@ -839,6 +854,24 @@ function App() {
       name: node.name,
       workspacePath: nodeWorkspacePath,
       isDir: node.isDir,
+      x: Math.max(12, Math.min(event.clientX, window.innerWidth - menuWidth)),
+      y: Math.max(12, Math.min(event.clientY, window.innerHeight - menuHeight)),
+    });
+  }
+
+  function openTabContextMenu(
+    event: ReactMouseEvent<HTMLButtonElement>,
+    tab: FileTab,
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    setTreeContextMenu(null);
+
+    const menuWidth = 228;
+    const menuHeight = 258;
+    setTabContextMenu({
+      path: tab.path,
+      name: tab.name,
       x: Math.max(12, Math.min(event.clientX, window.innerWidth - menuWidth)),
       y: Math.max(12, Math.min(event.clientY, window.innerHeight - menuHeight)),
     });
@@ -1015,6 +1048,34 @@ function App() {
     }
   }
 
+  async function handleCopyCurrentLine() {
+    if (!activeTab) {
+      return;
+    }
+
+    const editor = editorRef.current;
+    const selections = editor?.getSelections() ?? [];
+    const hasSelection = selections.some((selection) => !selection.isEmpty());
+    if (editor && hasSelection) {
+      editor.focus();
+      editor.trigger("toolbar", "editor.action.clipboardCopyAction", null);
+      return;
+    }
+
+    const lineNumber =
+      editor?.getPosition()?.lineNumber ?? viewStateRef.current[activeTab.path]?.line ?? 1;
+    const lineText =
+      editor && getEditorModelPath(editor) === normalizePath(activeTab.path)
+        ? editor.getModel()?.getLineContent(lineNumber) ?? lineTextAtNumber(activeTab.content, lineNumber)
+        : lineTextAtNumber(activeTab.content, lineNumber);
+
+    try {
+      await copyToClipboard(lineText);
+    } catch (error) {
+      pushToast(String(error), "error");
+    }
+  }
+
   function updateSettings(nextSettings: Partial<AppSettings>) {
     setSettings((previous) => normalizeSettings({ ...previous, ...nextSettings }));
   }
@@ -1136,6 +1197,8 @@ function App() {
         content: file.content,
         savedContent: file.content,
         dirty: false,
+        lastModifiedMs: file.modifiedAtMs,
+        externalStatus: "clean",
       };
 
       if (viewState) {
@@ -1269,11 +1332,17 @@ function App() {
     }
 
     try {
-      await writeFile(activeTab.path, activeTab.content);
+      const result = await writeFile(activeTab.path, activeTab.content);
       setTabs((previous) =>
         previous.map((tab) =>
           tab.path === activeTab.path
-            ? { ...tab, savedContent: tab.content, dirty: false }
+            ? {
+                ...tab,
+                savedContent: tab.content,
+                dirty: false,
+                lastModifiedMs: result.modifiedAtMs,
+                externalStatus: "clean",
+              }
             : tab,
         ),
       );
@@ -1316,21 +1385,36 @@ function App() {
     }
   }
 
-  async function handleCloseTab(filePath: string) {
+  async function closeTabs(
+    paths: string[],
+    preferredActivePath?: string | null,
+  ) {
     const currentTabs = tabsRef.current;
-    const index = currentTabs.findIndex((tab) => tab.path === filePath);
-    if (index === -1) {
+    const closingPaths = new Set(uniquePaths(paths));
+    const closingTabs = currentTabs.filter((tab) => closingPaths.has(tab.path));
+    if (closingTabs.length === 0) {
       return;
     }
 
-    const target = currentTabs[index];
-    if (target.dirty) {
+    const dirtyTabs = closingTabs.filter((tab) => tab.dirty);
+    if (dirtyTabs.length > 0) {
+      const names = dirtyTabs.slice(0, 3).map((tab) => tab.name).join(", ");
+      const extraCount = dirtyTabs.length > 3 ? ` and ${dirtyTabs.length - 3} more` : "";
       const shouldClose = isTauriRuntime
-        ? await confirm(`${target.name} has unsaved changes. Close anyway?`, {
-            title: "Unsaved changes",
-            kind: "warning",
-          })
-        : window.confirm(`${target.name} has unsaved changes. Close anyway?`);
+        ? await confirm(
+            dirtyTabs.length === 1
+              ? `${dirtyTabs[0].name} has unsaved changes. Close anyway?`
+              : `${dirtyTabs.length} tabs have unsaved changes (${names}${extraCount}). Close anyway?`,
+            {
+              title: "Unsaved changes",
+              kind: "warning",
+            },
+          )
+        : window.confirm(
+            dirtyTabs.length === 1
+              ? `${dirtyTabs[0].name} has unsaved changes. Close anyway?`
+              : `${dirtyTabs.length} tabs have unsaved changes (${names}${extraCount}). Close anyway?`,
+          );
 
       if (!shouldClose) {
         return;
@@ -1338,18 +1422,156 @@ function App() {
     }
 
     recordActiveViewState();
-    delete viewStateRef.current[filePath];
-    delete editorViewSnapshotsRef.current[filePath];
+    for (const path of closingPaths) {
+      delete viewStateRef.current[path];
+      delete editorViewSnapshotsRef.current[path];
+    }
 
-    const nextTabs = currentTabs.filter((tab) => tab.path !== filePath);
-    setTabs(nextTabs);
+    const activePath = activeTabPathRef.current;
+    const nextTabs = currentTabs.filter((tab) => !closingPaths.has(tab.path));
+    let nextActivePath =
+      preferredActivePath && nextTabs.some((tab) => tab.path === preferredActivePath)
+        ? preferredActivePath
+        : activePath && !closingPaths.has(activePath)
+          ? activePath
+          : null;
 
-    if (activeTabPathRef.current === filePath) {
-      const fallback = nextTabs[index] ?? nextTabs[index - 1] ?? null;
-      setActiveTabPath(fallback?.path ?? null);
-      if (fallback?.workspacePath) {
-        setWorkspacePath(fallback.workspacePath);
+    if (!nextActivePath && activePath) {
+      const activeIndex = currentTabs.findIndex((tab) => tab.path === activePath);
+      for (let index = activeIndex + 1; index < currentTabs.length; index += 1) {
+        if (!closingPaths.has(currentTabs[index].path)) {
+          nextActivePath = currentTabs[index].path;
+          break;
+        }
       }
+      if (!nextActivePath) {
+        for (let index = activeIndex - 1; index >= 0; index -= 1) {
+          if (!closingPaths.has(currentTabs[index].path)) {
+            nextActivePath = currentTabs[index].path;
+            break;
+          }
+        }
+      }
+    }
+
+    setTabs(nextTabs);
+    setActiveTabPath(nextActivePath);
+    const nextActiveTab = nextTabs.find((tab) => tab.path === nextActivePath) ?? null;
+    if (nextActiveTab?.workspacePath) {
+      setWorkspacePath(nextActiveTab.workspacePath);
+    }
+  }
+
+  async function handleCloseTab(filePath: string) {
+    await closeTabs([filePath]);
+  }
+
+  async function handleTabContextAction(action: "current" | "others" | "left" | "right" | "all") {
+    const target = tabContextMenu;
+    setTabContextMenu(null);
+    if (!target) {
+      return;
+    }
+
+    const currentTabs = tabsRef.current;
+    const targetIndex = currentTabs.findIndex((tab) => tab.path === target.path);
+    if (targetIndex === -1) {
+      return;
+    }
+
+    if (action === "current") {
+      await closeTabs([target.path]);
+      return;
+    }
+
+    if (action === "all") {
+      await closeTabs(currentTabs.map((tab) => tab.path));
+      return;
+    }
+
+    if (action === "others") {
+      await closeTabs(
+        currentTabs.filter((tab) => tab.path !== target.path).map((tab) => tab.path),
+        target.path,
+      );
+      return;
+    }
+
+    if (action === "left") {
+      await closeTabs(currentTabs.slice(0, targetIndex).map((tab) => tab.path), target.path);
+      return;
+    }
+
+    await closeTabs(currentTabs.slice(targetIndex + 1).map((tab) => tab.path), target.path);
+  }
+
+  async function handleRevealTabInFinder() {
+    const target = tabContextMenu;
+    setTabContextMenu(null);
+    if (!target) {
+      return;
+    }
+
+    try {
+      await revealInFileManager(target.path);
+    } catch (error) {
+      pushToast(String(error), "error");
+    }
+  }
+
+  async function handleReloadTab(filePath = activeTabPathRef.current) {
+    if (!filePath) {
+      return;
+    }
+
+    const target = tabsRef.current.find((tab) => tab.path === filePath);
+    if (!target) {
+      return;
+    }
+
+    if (target.dirty) {
+      const shouldReload = isTauriRuntime
+        ? await confirm(`${target.name} has unsaved changes. Reload from disk and discard them?`, {
+            title: "Reload file",
+            kind: "warning",
+          })
+        : window.confirm(`${target.name} has unsaved changes. Reload from disk and discard them?`);
+      if (!shouldReload) {
+        return;
+      }
+    }
+
+    const preservedView = viewStateRef.current[filePath]
+      ? { ...viewStateRef.current[filePath], filePath }
+      : null;
+    if (preservedView) {
+      pendingViewStateRef.current = preservedView;
+    }
+
+    try {
+      const file = await readFile(filePath);
+      setTabs((previous) =>
+        previous.map((tab) =>
+          tab.path === filePath
+            ? {
+                ...tab,
+                name: file.name,
+                extension: file.extension,
+                content: file.content,
+                savedContent: file.content,
+                dirty: false,
+                lastModifiedMs: file.modifiedAtMs,
+                externalStatus: "clean",
+              }
+            : tab,
+        ),
+      );
+      window.requestAnimationFrame(() => {
+        restoreEditorView(filePath);
+      });
+      pushToast(`Reloaded ${file.name}`, "success");
+    } catch (error) {
+      pushToast(String(error), "error");
     }
   }
 
@@ -1679,6 +1901,8 @@ function App() {
               content: file.content,
               savedContent: file.content,
               dirty: false,
+              lastModifiedMs: file.modifiedAtMs,
+              externalStatus: "clean",
             });
           } catch {
             missingTabs.push(filePath);
@@ -1747,6 +1971,85 @@ function App() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!isTauriRuntime || !sessionReadyRef.current || tabs.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function scanExternalChanges() {
+      if (cancelled || externalScanInFlightRef.current || document.hidden) {
+        return;
+      }
+
+      const openPaths = uniquePaths(tabsRef.current.map((tab) => tab.path));
+      if (openPaths.length === 0) {
+        return;
+      }
+
+      externalScanInFlightRef.current = true;
+      try {
+        const inspections = await inspectFiles(openPaths);
+        if (cancelled) {
+          return;
+        }
+
+        const inspectionMap = new Map(
+          inspections.map((item) => [normalizePath(item.path), item] as const),
+        );
+
+        setTabs((previous) =>
+          previous.map((tab) => {
+            const inspection =
+              inspectionMap.get(normalizePath(tab.path)) ??
+              inspections.find((item) => normalizePath(item.path) === normalizePath(tab.path));
+            if (!inspection) {
+              return tab;
+            }
+
+            if (!inspection.exists) {
+              return tab.externalStatus === "missing"
+                ? tab
+                : { ...tab, externalStatus: "missing" };
+            }
+
+            if (inspection.modifiedAtMs === tab.lastModifiedMs) {
+              return tab.externalStatus === "clean"
+                ? tab
+                : { ...tab, externalStatus: "clean" };
+            }
+
+            return tab.externalStatus === "modified"
+              ? tab
+              : { ...tab, externalStatus: "modified" };
+          }),
+        );
+      } catch {
+        // Ignore transient file stat failures; the next tick will retry.
+      } finally {
+        externalScanInFlightRef.current = false;
+      }
+    }
+
+    const interval = window.setInterval(() => {
+      void scanExternalChanges();
+    }, 2200);
+    const onVisibilityChange = () => {
+      if (!document.hidden) {
+        void scanExternalChanges();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    void scanExternalChanges();
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [tabs.length, sessionReadyRef.current]);
 
   useEffect(() => {
     if (!sessionReadyRef.current) {
@@ -2026,6 +2329,11 @@ function App() {
           setTreeContextMenu(null);
           return;
         }
+        if (tabContextMenu) {
+          event.preventDefault();
+          setTabContextMenu(null);
+          return;
+        }
         setSettingsOpen(false);
         return;
       }
@@ -2089,7 +2397,7 @@ function App() {
     return () => {
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [quickJumpOpen, treeContextMenu, zoomEnabled, settings.textZoom, activeTab]);
+  }, [quickJumpOpen, treeContextMenu, tabContextMenu, zoomEnabled, settings.textZoom, activeTab]);
 
   const splitLayoutStyle =
     showEditorPanel && showPreviewPanel
@@ -2453,13 +2761,7 @@ function App() {
             </button>
             <button
               className="icon-button"
-              onClick={() =>
-                editorRef.current?.trigger(
-                  "toolbar",
-                  "editor.action.clipboardCopyAction",
-                  null,
-                )
-              }
+              onClick={() => void handleCopyCurrentLine()}
               disabled={!activeTab}
             >
               Copy
@@ -2515,11 +2817,14 @@ function App() {
             tabs.map((tab) => (
               <button
                 key={tab.path}
-                className={`tab-chip ${tab.path === activeTabPath ? "active" : ""}`}
+                className={`tab-chip ${tab.path === activeTabPath ? "active" : ""} ${
+                  tab.externalStatus !== "clean" ? `tab-chip-${tab.externalStatus}` : ""
+                }`}
                 onClick={() => {
                   recordActiveViewState();
                   setActiveTabPath(tab.path);
                 }}
+                onContextMenu={(event) => openTabContextMenu(event, tab)}
               >
                 <span>{tab.name}</span>
                 {tab.dirty ? <span className="dirty-dot" /> : null}
@@ -2553,6 +2858,14 @@ function App() {
                   <div className="status-badges">
                     <span>{activeTab.extension.toUpperCase()}</span>
                     <span>{activeTab.dirty ? "Unsaved" : "Saved"}</span>
+                    {activeTab.externalStatus === "modified" ? (
+                      <button className="status-action warning" onClick={() => void handleReloadTab(activeTab.path)}>
+                        Reload from disk
+                      </button>
+                    ) : null}
+                    {activeTab.externalStatus === "missing" ? (
+                      <span className="status-badge-warning">Missing on disk</span>
+                    ) : null}
                   </div>
                 </div>
                 {activeTab.extension === "jsonl" && jsonlStatus && !jsonlStatus.valid ? (
@@ -2731,6 +3044,47 @@ function App() {
               onClick={() => void handleTrashWorkspaceNode(treeContextMenu)}
             >
               Move to trash
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {tabContextMenu ? (
+        <div
+          className="tree-context-menu-layer"
+          onClick={() => setTabContextMenu(null)}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            setTabContextMenu(null);
+          }}
+        >
+          <div
+            className="tree-context-menu"
+            style={{ left: tabContextMenu.x, top: tabContextMenu.y }}
+            onClick={(event) => event.stopPropagation()}
+            onContextMenu={(event) => event.preventDefault()}
+          >
+            <div className="tree-context-menu-label">
+              <strong>{tabContextMenu.name}</strong>
+              <span>Tab actions</span>
+            </div>
+            <button className="tree-context-action" onClick={() => void handleTabContextAction("current")}>
+              Close
+            </button>
+            <button className="tree-context-action" onClick={() => void handleRevealTabInFinder()}>
+              Show in Finder
+            </button>
+            <button className="tree-context-action" onClick={() => void handleTabContextAction("others")}>
+              Close others
+            </button>
+            <button className="tree-context-action" onClick={() => void handleTabContextAction("left")}>
+              Close left
+            </button>
+            <button className="tree-context-action" onClick={() => void handleTabContextAction("right")}>
+              Close right
+            </button>
+            <button className="tree-context-action danger" onClick={() => void handleTabContextAction("all")}>
+              Close all
             </button>
           </div>
         </div>

@@ -672,6 +672,16 @@ button {
   color: var(--heading-text);
 }
 
+.tab-chip-modified {
+  border-color: rgba(214, 157, 93, 0.48);
+  box-shadow: inset 0 0 0 1px rgba(214, 157, 93, 0.18);
+}
+
+.tab-chip-missing {
+  border-color: rgba(186, 92, 72, 0.42);
+  box-shadow: inset 0 0 0 1px rgba(186, 92, 72, 0.18);
+}
+
 .dirty-dot {
   width: 8px;
   height: 8px;
@@ -775,6 +785,26 @@ button {
   background: var(--badge-bg);
   border-radius: 999px;
   padding: 6px 10px;
+}
+
+.status-action,
+.status-badge-warning {
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 0.9rem;
+}
+
+.status-action {
+  border: 1px solid var(--border-button);
+  background: var(--surface-soft);
+  color: var(--button-text);
+}
+
+.status-action.warning,
+.status-badge-warning {
+  background: rgba(214, 157, 93, 0.16);
+  color: var(--accent-text);
+  border: 1px solid rgba(214, 157, 93, 0.28);
 }
 
 .error-banner {

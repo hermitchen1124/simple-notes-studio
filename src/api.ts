@@ -4,6 +4,7 @@ import type {
   AppSettings,
   EditorViewState,
   FileContent,
+  FileInspection,
   FormatResult,
   SaveResult,
   SearchHit,
@@ -352,6 +353,7 @@ function mockReadFile(path: string): FileContent {
     name: detectName(path),
     extension: detectExtension(path),
     content,
+    modifiedAtMs: null,
   };
 }
 
@@ -383,6 +385,7 @@ function writeFile(path: string, content: string) {
     return Promise.resolve({
       path,
       bytesWritten: new TextEncoder().encode(content).length,
+      modifiedAtMs: null,
     });
   }
 
@@ -409,6 +412,14 @@ function movePathToTrash(path: string, isDir: boolean) {
   return invoke<void>("move_to_trash", { path });
 }
 
+function revealInFileManager(path: string) {
+  if (!isTauriRuntime) {
+    return Promise.resolve();
+  }
+
+  return invoke<void>("reveal_in_file_manager", { path });
+}
+
 function startupFiles() {
   if (!isTauriRuntime) {
     return Promise.resolve<string[]>([]);
@@ -423,6 +434,20 @@ function takePendingOpenFiles() {
   }
 
   return invoke<string[]>("take_pending_open_files");
+}
+
+function inspectFiles(paths: string[]) {
+  if (!isTauriRuntime) {
+    return Promise.resolve<FileInspection[]>(
+      paths.map((path) => ({
+        path,
+        exists: true,
+        modifiedAtMs: null,
+      })),
+    );
+  }
+
+  return invoke<FileInspection[]>("inspect_files", { paths });
 }
 
 function listenForOpenFiles(handler: (paths: string[]) => void | Promise<void>) {
@@ -506,6 +531,8 @@ export {
   saveSession,
   searchWorkspace,
   movePathToTrash,
+  revealInFileManager,
+  inspectFiles,
   takePendingOpenFiles,
   listenForOpenFiles,
   startupFiles,

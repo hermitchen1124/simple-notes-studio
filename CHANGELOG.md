@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.8
+
+- Added a tab context menu with close-current, close-others, close-left, close-right, and close-all actions.
+- Added `Show in Finder` to the tab context menu so the current file can be revealed directly from the app.
+- Changed toolbar `Copy` so it now copies the current line when no selection exists, while still copying the selected text normally.
+- Added external file change detection for open tabs, including visible modified or missing indicators and a guarded `Reload from disk` action.
+- Added single-instance file open forwarding so files opened from Finder while the app is already running are routed into the existing window.
+
 ## 0.1.7
 
 - Added a workspace-tree context menu so files and folders can be moved to the system trash instead of being deleted permanently.

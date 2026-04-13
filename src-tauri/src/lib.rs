@@ -4,6 +4,8 @@ use std::{
     cmp::Ordering,
     env,
     fs,
+    process::Command,
+    time::UNIX_EPOCH,
     sync::{
         atomic::{AtomicBool, Ordering as AtomicOrdering},
         Mutex,
@@ -45,6 +47,7 @@ struct FileContent {
     name: String,
     extension: String,
     content: String,
+    modified_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -52,6 +55,15 @@ struct FileContent {
 struct SaveResult {
     path: String,
     bytes_written: usize,
+    modified_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct FileInspection {
+    path: String,
+    exists: bool,
+    modified_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -153,6 +165,7 @@ fn read_file(path: String) -> Result<FileContent, String> {
         name: file_name(&file_path),
         extension: file_extension(&file_path),
         content,
+        modified_at_ms: file_modified_at_ms(&file_path),
     })
 }
 
@@ -172,6 +185,7 @@ fn write_file(path: String, content: String) -> Result<SaveResult, String> {
     Ok(SaveResult {
         path: normalized_path.to_string_lossy().to_string(),
         bytes_written: content.len(),
+        modified_at_ms: file_modified_at_ms(&normalized_path),
     })
 }
 
@@ -184,6 +198,108 @@ fn move_to_trash(path: String) -> Result<(), String> {
 
     trash::delete(&target_path)
         .map_err(|error| format!("Failed to move {} to trash: {error}", target_path.display()))
+}
+
+#[tauri::command]
+fn reveal_in_file_manager(path: String) -> Result<(), String> {
+    let requested_path = PathBuf::from(&path);
+    let target_path = if requested_path.exists() {
+        normalize_existing_path(&requested_path)
+    } else {
+        requested_path
+            .parent()
+            .filter(|parent| parent.exists())
+            .map(normalize_existing_path)
+            .ok_or_else(|| format!("Path not found: {path}"))?
+    };
+
+    #[cfg(target_os = "macos")]
+    {
+        let status = Command::new("open")
+            .arg("-R")
+            .arg(&target_path)
+            .status()
+            .map_err(|error| format!("Failed to reveal {} in Finder: {error}", target_path.display()))?;
+
+        if status.success() {
+            return Ok(());
+        }
+
+        return Err(format!("Finder reveal failed for {}", target_path.display()));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let status = Command::new("explorer")
+            .arg("/select,")
+            .arg(&target_path)
+            .status()
+            .map_err(|error| {
+                format!(
+                    "Failed to reveal {} in Explorer: {error}",
+                    target_path.display()
+                )
+            })?;
+
+        if status.success() {
+            return Ok(());
+        }
+
+        return Err(format!("Explorer reveal failed for {}", target_path.display()));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let directory = if target_path.is_dir() {
+            target_path.clone()
+        } else {
+            target_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or(target_path.clone())
+        };
+        let status = Command::new("xdg-open")
+            .arg(&directory)
+            .status()
+            .map_err(|error| {
+                format!(
+                    "Failed to reveal {} in file manager: {error}",
+                    directory.display()
+                )
+            })?;
+
+        if status.success() {
+            return Ok(());
+        }
+
+        return Err(format!("File manager reveal failed for {}", directory.display()));
+    }
+}
+
+#[tauri::command]
+fn inspect_files(paths: Vec<String>) -> Vec<FileInspection> {
+    dedupe_file_paths(paths)
+        .into_iter()
+        .map(|path| {
+            let requested = PathBuf::from(&path);
+            let normalized = if requested.exists() {
+                normalize_existing_path(&requested)
+            } else {
+                requested.clone()
+            };
+            let metadata = fs::metadata(&normalized).ok();
+
+            FileInspection {
+                path: normalized.to_string_lossy().to_string(),
+                exists: metadata.is_some(),
+                modified_at_ms: metadata
+                    .as_ref()
+                    .and_then(|item| item.modified().ok())
+                    .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64),
+            }
+        })
+        .collect()
 }
 
 #[tauri::command]
@@ -437,6 +553,14 @@ fn normalize_existing_path(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+fn file_modified_at_ms(path: &Path) -> Option<u64> {
+    fs::metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+}
+
 fn supported_file_paths<I>(paths: I) -> Vec<String>
 where
     I: IntoIterator<Item = PathBuf>,
@@ -624,11 +748,21 @@ pub fn run() {
         .manage(OpenRequestState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            let paths = supported_file_paths(argv.into_iter().skip(1).map(PathBuf::from));
+            if paths.is_empty() {
+                focus_main_window(app);
+            } else {
+                emit_or_queue_open_files(app, paths);
+            }
+        }))
         .invoke_handler(tauri::generate_handler![
             open_workspace,
             read_file,
             write_file,
             move_to_trash,
+            reveal_in_file_manager,
+            inspect_files,
             search_workspace,
             validate_and_format_json,
             validate_and_format_jsonl,

@@ -10,11 +10,19 @@ export type FileContent = {
   name: string;
   extension: string;
   content: string;
+  modifiedAtMs: number | null;
 };
 
 export type SaveResult = {
   path: string;
   bytesWritten: number;
+  modifiedAtMs: number | null;
+};
+
+export type FileInspection = {
+  path: string;
+  exists: boolean;
+  modifiedAtMs: number | null;
 };
 
 export type SearchHit = {
@@ -73,4 +81,6 @@ export type FileTab = {
   content: string;
   savedContent: string;
   dirty: boolean;
+  lastModifiedMs: number | null;
+  externalStatus: "clean" | "modified" | "missing";
 };
